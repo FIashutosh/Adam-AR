@@ -125,35 +125,66 @@ export async function preprocessAudioForTranscription(filePath: string): Promise
   const dir = path.dirname(filePath);
   const base = path.basename(filePath, path.extname(filePath));
 
-  const normalizedPath = path.join(dir, `${base}_norm_16k.wav`);
+  const normalizedPath = path.join(dir, `${base}_enhanced_16k.wav`);
 
   try {
-    // 1. Format normalization: 16kHz, mono, loudnorm filter to normalize volume levels for whisper
+    // 0. Cache check: return existing enhanced file if valid
+    if (fs.existsSync(normalizedPath) && fs.statSync(normalizedPath).size > 1024) {
+      return {
+        originalPath: filePath,
+        normalizedPath,
+        channel0Path: fs.existsSync(path.join(dir, `${base}_ch0_audio.wav`)) ? path.join(dir, `${base}_ch0_audio.wav`) : undefined,
+        channel1Path: fs.existsSync(path.join(dir, `${base}_ch1_audio.wav`)) ? path.join(dir, `${base}_ch1_audio.wav`) : undefined,
+        metrics,
+      };
+    }
+
+    // 1. Multi-stage DSP Telephony Speech Cleaner & Normalizer:
+    // - aresample=16000: Standardize sampling to 16kHz for speech models
+    // - highpass=f=80: Strip 50/60Hz AC line hum, microphone handling thumps & HVAC rumble without clipping male voice fundamentals
+    // - lowpass=f=7500: Filter out high-frequency GSM buzz and line hiss outside speech formants while preserving sibilants
+    // - afftdn=nf=-25:nr=10: Adaptive FFT spectral noise reduction to remove continuous line noise
+    // - dynaudnorm=f=150:g=15:p=0.95:m=10.0:r=0.9: Dynamic Speech Normalizer (levels quiet client mobile audio with advisor)
+    // - loudnorm=I=-16:TP=-1.5:LRA=11: Standardize target EBU R128 integrated loudness for optimal ASR sensitivity
+    const speechCleanerFilter = 'aresample=16000,highpass=f=80,lowpass=f=7500,afftdn=nf=-25:nr=10,dynaudnorm=f=150:g=15:p=0.95:m=10.0:r=0.9,loudnorm=I=-16:TP=-1.5:LRA=11';
+
     await execFileAsync('ffmpeg', [
       '-y',
       '-i', filePath,
+      '-af', speechCleanerFilter,
       '-ar', '16000',
       '-ac', '1',
-      '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',
       normalizedPath,
-    ], { timeout: 25000, maxBuffer: 10 * 1024 * 1024 });
+    ], { timeout: 35000, maxBuffer: 10 * 1024 * 1024 });
   } catch {
-    // Fallback if loudnorm fails: simple resample
+    // Fallback if full DSP chain fails: bandpass + loudnorm
     try {
       await execFileAsync('ffmpeg', [
         '-y',
         '-i', filePath,
+        '-af', 'aresample=16000,highpass=f=80,lowpass=f=7500,loudnorm=I=-16:TP=-1.5:LRA=11',
         '-ar', '16000',
         '-ac', '1',
         normalizedPath,
-      ], { timeout: 20000, maxBuffer: 10 * 1024 * 1024 });
+      ], { timeout: 25000, maxBuffer: 10 * 1024 * 1024 });
     } catch {
-      // If ffmpeg fails, use original path
-      return {
-        originalPath: filePath,
-        normalizedPath: filePath,
-        metrics,
-      };
+      // Fallback if filters fail: clean 16kHz mono resample
+      try {
+        await execFileAsync('ffmpeg', [
+          '-y',
+          '-i', filePath,
+          '-ar', '16000',
+          '-ac', '1',
+          normalizedPath,
+        ], { timeout: 20000, maxBuffer: 10 * 1024 * 1024 });
+      } catch {
+        // If ffmpeg fails, use original path
+        return {
+          originalPath: filePath,
+          normalizedPath: filePath,
+          metrics,
+        };
+      }
     }
   }
 

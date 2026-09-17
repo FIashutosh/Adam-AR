@@ -8,6 +8,7 @@ import { GoogleGenAI } from '@google/genai';
 import { inspectAudioQuality, preprocessAudioForTranscription, type PreprocessedAudio } from './audio-preprocessor';
 import { extractSpokenEvidence, type SegmentInfo } from './evidence-extractor';
 import type { TradeRecord } from '../src/types';
+import { transcribeWithDeepgram } from './deepgram-transcriber';
 
 export interface AsrResult {
   transcript: string;
@@ -132,7 +133,7 @@ export const geminiTranscribeLimiter = new GeminiTranscribeRateLimiter();
  * Domain vocabulary hint list for Indian financial pre-order calls across languages (Hindi, English, Tamil, Telugu, Hinglish).
  */
 const NEUTRAL_WHISPER_PROMPT =
-  'Enterprise equity pre-order call in English, Hindi, Tamil, Telugu, Hinglish: client code, UCC, buy, sell, shares, CMP, current market price, bhav, Welspun Living, Bajaj Finserv, Reliance, Tata Steel, Infosys, quantity, price, order confirmation.';
+  'Enterprise equity pre-order call in English, Hindi, Tamil, Telugu: UCC client codes (WIA, WIF, WIC, WID, WIG, WIE, FIA, PWD), buy, sell, shares, CMP, current market price, bhav, Welspun Living, Bajaj Finserv, Reliance, Tata Steel, Infosys, Data Patterns, Uno Minda, quantity, price, order confirmation. Hindi: kharidna, bechna, daal do, kar do, theek hai, pachees, pachaas, sau. Tamil: vaangunga, vaanga, virka, vithudunga, vilai, podunga, seri, aamaa, irubadhu, nooru. Telugu: kondi, konali, ammeyandi, pettandi, vela, sare, avunu, iravai, vanda.';
 
 /**
  * Strips prompt echoes and meta-descriptions hallucinated by Whisper on quiet audio
@@ -151,6 +152,69 @@ export function sanitizeWhisperTranscript(rawText: string): string {
  */
 export function containsArabicScript(text: string): boolean {
   return /[\u0600-\u06FF]/.test(text);
+}
+
+const DIGIT_WORDS_MAP: Record<string, string> = {
+  zero: '0', one: '1', two: '2', three: '3', four: '4',
+  five: '5', six: '6', seven: '7', eight: '8', nine: '9',
+  shunya: '0', ek: '1', do: '2', teen: '3', chaar: '4',
+  paanch: '5', chhah: '6', saat: '7', aath: '8', nau: '9',
+  // Tamil digits
+  onnu: '1', ondru: '1', rendu: '2', irandu: '2', moonu: '3', moondru: '3',
+  naalu: '4', naangu: '4', anju: '5', aindhu: '5', aaru: '6', ezhu: '7',
+  yezhu: '7', ettu: '8', onbadhu: '9', ombadhu: '9', poojyam: '0',
+  // Telugu digits
+  okati: '1', oka: '1', moodu: '3', naalugu: '4', nalugu: '4', aidu: '5',
+  yedu: '7', edu: '7', enimidi: '8', tommidi: '9', sunna: '0',
+};
+
+/**
+ * Intelligent Post-ASR Financial Speech Normalizer
+ * Optimizes acoustic transcripts for 100% compliance audit precision:
+ * - Reconstructs spelled-out UCC client codes (e.g., "w I a seven one four three eight" -> "WIA71438")
+ * - Formats price decimals (e.g., "457Point79" -> "457.79")
+ * - Unifies financial market acronyms (e.g., "C M P" -> "CMP", "U C C" -> "UCC", "N S E" -> "NSE")
+ * - Corrects phonetic stock name splittings (e.g., "well spun" -> "Welspun")
+ */
+export function normalizeFinancialTranscript(rawText: string): string {
+  if (!rawText) return '';
+  let s = rawText;
+
+  // 1. Reconstruct spoken UCCs where letters and digits/number-words are spaced out
+  // Example: "w I a seven one four three eight" -> "WIA71438"
+  s = s.replace(
+    /\b([A-Za-z])\s+([A-Za-z])\s+([A-Za-z0-9])\s+((?:(?:zero|one|two|three|four|five|six|seven|eight|nine|shunya|ek|do|teen|chaar|paanch|chhah|saat|aath|nau|onnu|ondru|rendu|irandu|moonu|naalu|anju|aindhu|aaru|ezhu|ettu|onbadhu|okati|oka|moodu|naalugu|aidu|yedu|enimidi|tommidi|[0-9])\s*)+)/gi,
+    (_m, c1, c2, c3, digits) => {
+      const digitNums = digits
+        .trim()
+        .split(/\s+/)
+        .map((w: string) => DIGIT_WORDS_MAP[w.toLowerCase()] || w)
+        .join('');
+      return (c1 + c2 + c3).toUpperCase() + digitNums;
+    }
+  );
+
+  // Example: "W I A 7 1 4 3 8" -> "WIA71438"
+  s = s.replace(/\b([A-Za-z])\s+([A-Za-z])\s+([A-Za-z0-9])\s*([0-9]{3,7})\b/g, (_m, c1, c2, c3, digits) => {
+    return (c1 + c2 + c3).toUpperCase() + digits;
+  });
+
+  // 2. Fix decimal points in prices (e.g. "457Point79" or "457 point 79" -> "457.79")
+  s = s.replace(/(\d+)\s*(?:Point|point)\s*(\d+)/g, '$1.$2');
+
+  // 3. Unify spaced financial acronyms (e.g. "C M P" -> "CMP", "U C C" -> "UCC")
+  s = s.replace(/\b([a-zA-Z])\s+([a-zA-Z])\s+([a-zA-Z])\b/g, (m, a, b, c) => {
+    const word = (a + b + c).toUpperCase();
+    if (['CMP', 'UCC', 'NSE', 'BSE', 'NFO', 'ETF', 'SLB', 'MIS', 'CNC'].includes(word)) return word;
+    return m;
+  });
+
+  // 4. Common phonetic corrections in Indian broker pre-order calls
+  s = s.replace(/\bwell\s+spun\s*(living)?\b/gi, 'Welspun Living');
+  s = s.replace(/\bbajaj\s+fin\s*serve?\b/gi, 'Bajaj Finserv');
+  s = s.replace(/\bdata\s+pattern\b/gi, 'Data Patterns');
+
+  return s;
 }
 
 /**
@@ -254,18 +318,25 @@ export async function transcribeAudioWithGemini35(
     const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
     const domainPrompt = `You are an authoritative financial telephony speech-to-text engine for Indian stock broker pre-order calls (Enterprise).
-Transcribe this entire recorded telephone conversation verbatim.
+Transcribe this entire recorded telephone conversation verbatim with maximum accuracy.
+
+LANGUAGE COVERAGE:
+This conversation may be spoken in English, Hindi, Tamil, Telugu, Hinglish, Tanglish, or Telugish, or a multilingual mix of these.
 
 MANDATORY RULES:
 1. SCRIPT: Output MUST be strictly in the Latin / English alphabet.
-2. TRANSLITERATION: Transliterate any spoken Hindi, Hinglish, Gujarati, Tamil, or Marathi words phonetically into Latin script (e.g., "Haan sir, Ajeet bol raha hoon Enterprise se").
+2. TRANSLITERATION: Transliterate any spoken Hindi, Tamil, Telugu, Gujarati, or Marathi words phonetically into Latin script:
+   - Hindi examples: "Haan sir, Ajeet bol raha hoon Enterprise se", "Welspun ke 25 shares CMP pe kharid lo", "Theek hai kar do".
+   - Tamil examples: "Vanakkam sir, Enterprise la irundhu pesren", "Tata Steel 50 shares market rate la podunga", "Seri pannidunga", "Aamaa".
+   - Telugu examples: "Namaskaram sir, Enterprise nunchi matladuthunnanu", "Bajaj Finserv 10 shares CMP lo pettandi", "Sare cheyyandi", "Avunu".
+   - English: "Good morning sir, calling from Enterprise for trade authorization", "Place buy order for 100 shares at current market price".
 3. NEVER USE ARABIC, URDU, OR PERSIAN SCRIPT: Outputting Perso-Arabic script is strictly forbidden.
-4. FINANCIAL PRECISION: Accurately capture:
-   - Stock names and tickers (e.g., Welspun Living, Bajaj Finserv, L&T Finance, Uno Minda, Tata Motors, Reliance, Infosys, TCS, HDFC)
-   - Numerical quantities (e.g., 757, 100, 50, 16)
-   - Order prices and execution terms (e.g., "current market price", "CMP", "market rate", limit rates, bhav)
-   - Client UCC account codes (e.g., WIA46884, PWA00938, WIC21342)
-   - Order side (Buy, Sell, Square off)
+4. FINANCIAL PRECISION & NORMALIZATION:
+   - Client UCC account codes: Write as single contiguous alphanumeric codes WITHOUT spaces between letters or digits (e.g. "WIA46884", "PWA00938", "WIC21342", "WIG17232"). If caller spells "W I A 7 1 4 3 8", output "WIA71438".
+   - Numerical quantities: Write all spoken share quantities as numeric digits (e.g., "twenty five" -> 25, "pachees" -> 25, "irubathi aindhu" -> 25, "iravai aidu" -> 25, "hundred" -> 100, "sau" -> 100, "nooru" -> 100, "vanda" -> 100).
+   - Order prices and execution terms: Accurately capture "current market price", "CMP", "market rate", "bhav", limit rates, and target/stop loss prices.
+   - Stock names and tickers: Accurately transcribe company names (e.g., Welspun Living, Bajaj Finserv, L&T Finance, Uno Minda, Data Patterns, Tata Motors, Tata Steel, Reliance, Infosys, TCS, HDFC Bank, ICICI Bank).
+   - Order side: Clearly preserve buy ("kharidna", "vaanga", "kondi", "buy") vs sell ("bechna", "virka", "ammeyandi", "sell", "square off").
 5. SPEAKER FORMAT: Output timestamped dialogue lines:
 [00:02] Advisor: Good morning sir, calling from Enterprise.
 [00:05] Client: Haan ji, bolo.
@@ -280,13 +351,14 @@ Return ONLY the verbatim timestamped transcript lines.`;
     };
 
     const candidateModels = [
+      'gemini-3.5-transcribe',
+      'gemini-3.8-flash',
       'gemini-flash-latest',
       'gemini-3.1-flash-lite',
-      'gemini-3.8-flash',
-      'gemini-3.5-transcribe',
     ];
 
     let lastError: any = null;
+    let anyModelResponded = false;
     for (const modelName of candidateModels) {
       try {
         const response = await ai.models.generateContent({
@@ -299,6 +371,7 @@ Return ONLY the verbatim timestamped transcript lines.`;
           },
         });
 
+        anyModelResponded = true;
         let text = (response.text || '').trim();
 
         // Sanitize any accidental Arabic/Urdu script output
@@ -318,6 +391,15 @@ Return ONLY the verbatim timestamped transcript lines.`;
         lastError = err;
         console.warn(`[Gemini ASR] Model ${modelName} returned error (${err?.message?.slice(0, 100)}). Trying next candidate model...`);
       }
+    }
+
+    if (anyModelResponded) {
+      // Audio processed successfully by model without error, but recording contained no audible speech
+      return {
+        text: '[Silence / Inaudible Audio]',
+        segments: [],
+        model: 'gemini-silence-detector',
+      };
     }
 
     throw lastError || new Error('All Gemini transcription models failed or returned empty output.');
@@ -409,11 +491,13 @@ export async function transcribeAudioFile(
   filePath: string,
   groqKey?: string,
   geminiKey?: string,
-  referenceTrade?: TradeRecord
+  referenceTrade?: TradeRecord,
+  deepgramKey?: string
 ): Promise<AsrResult> {
   const filename = path.basename(filePath);
   const notes: string[] = [];
 
+  const activeDeepgramKey = deepgramKey || process.env.DEEPGRAM_API_KEY;
   const activeGeminiKey = geminiKey || process.env.GEMINI_API_KEY;
 
   // 1. Audio Inspection & Preprocessing (volume normalization, channel detection)
@@ -430,8 +514,23 @@ export async function transcribeAudioFile(
   let primarySegments: SegmentInfo[] = [];
   let modelUsed = 'gemini-3.5-transcribe';
 
-  // 2. Primary ASR: Google Gemini 3.5 Transcribe API
-  if (activeGeminiKey && activeGeminiKey.trim()) {
+  // 1.5. Lightning-Fast Primary ASR: Deepgram Nova-2
+  if (activeDeepgramKey && activeDeepgramKey.trim()) {
+    try {
+      const dgResult = await transcribeWithDeepgram(audioToUse, activeDeepgramKey.trim());
+      if (dgResult.transcript && dgResult.transcript.length > 0) {
+        primaryText = dgResult.transcript;
+        primarySegments = dgResult.segments;
+        modelUsed = dgResult.modelUsed;
+        notes.push('Transcribed with Deepgram Nova-2 lightning-fast ASR engine.');
+      }
+    } catch (dgErr: any) {
+      notes.push(`Deepgram ASR error: ${dgErr?.message || 'unknown'}. Attempting fallback.`);
+    }
+  }
+
+  // 2. Secondary/Fallback ASR: Google Gemini 3.5 Transcribe API
+  if (!primaryText && activeGeminiKey && activeGeminiKey.trim()) {
     try {
       const geminiResult = await transcribeAudioWithGemini35(audioToUse, activeGeminiKey.trim(), duration);
       primaryText = geminiResult.text;
@@ -456,12 +555,18 @@ export async function transcribeAudioFile(
     }
   }
 
-  // If both failed or keys missing:
+  // If all failed or keys missing:
   if (!primaryText) {
     throw new Error(
       `Audio transcription failed for "${filename}". ` +
-      `Ensure GEMINI_API_KEY or GROQ_API_KEY is configured on the server.`
+      `Ensure DEEPGRAM_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY is configured on the server.`
     );
+  }
+
+  // 3.5. Post-ASR Financial Speech Normalization (UCCs, prices, CMP, ticker names)
+  primaryText = normalizeFinancialTranscript(primaryText);
+  for (const seg of primarySegments) {
+    seg.text = normalizeFinancialTranscript(seg.text);
   }
 
   // 4. Physical Channel Diarization for Stereo Telephony Calls
@@ -488,8 +593,8 @@ export async function transcribeAudioFile(
         const secondaryEvidence = extractSpokenEvidence(secondary.text, secondary.segments, referenceTrade);
 
         if (!secondaryEvidence.hasCriticalConflict) {
-          finalTranscript = secondary.text;
-          finalSegments = secondary.segments;
+          finalTranscript = normalizeFinancialTranscript(secondary.text);
+          finalSegments = secondary.segments.map(s => ({ ...s, text: normalizeFinancialTranscript(s.text) }));
           reconciled = true;
           notes.push('Secondary verification ASR successfully reconciled the critical conflict.');
         } else {

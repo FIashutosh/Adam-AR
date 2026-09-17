@@ -80,40 +80,46 @@ function buildEnsemblePassConfigs(hasGroq: boolean, hasGemini: boolean, matchedT
   const clientHint = clientCode ? `Client code ${clientCode}` : 'Client UCC account code';
 
   const geminiPromptDetailed = `You are an expert SEBI compliance auditor and stock trading telephone call transcriber.
-Transcribe this entire recorded telephone conversation verbatim with 100% accuracy.
+Transcribe this entire recorded telephone conversation verbatim with maximum accuracy.
+
+LANGUAGE COVERAGE:
+This conversation may be conducted in English, Hindi, Tamil, Telugu, Hinglish, Tanglish, or Telugish.
 
 CRITICAL INSTRUCTIONS:
 1. OUTPUT SCRIPT: Output MUST be strictly in the Latin / English alphabet.
-2. TRANSLITERATION: Transliterate any spoken Hindi, Hinglish, Marathi, or Gujarati words phonetically into Latin script (e.g. "Haan sir, Ajeet bol raha hoon Finns India se...").
+2. TRANSLITERATION: Transliterate any spoken Hindi, Tamil, Telugu, Marathi, or Gujarati words phonetically into Latin script:
+   - Hindi examples: "Haan sir, Ajeet bol raha hoon Enterprise se", "25 shares CMP pe le lo", "Theek hai kar do".
+   - Tamil examples: "Vanakkam sir, Enterprise la irundhu pesren", "Tata Steel 50 shares market rate la podunga", "Seri pannunga", "Aamaa".
+   - Telugu examples: "Namaskaram sir, Enterprise nunchi matladuthunnanu", "Bajaj Finserv 10 shares CMP lo pettandi", "Sare cheyyandi", "Avunu".
 3. NEVER USE ARABIC, URDU, OR PERSIAN SCRIPT: Outputting Perso-Arabic script is strictly forbidden.
-4. FINANCIAL PRECISION: Accurately capture stock company names (e.g. ${stockHint}), exact numerical quantities (e.g. ${qtyHint}), execution prices (e.g. "current market price", "CMP", limit rates), and client UCC codes (e.g. ${clientHint}).
+4. FINANCIAL PRECISION: Accurately capture stock company names (e.g. ${stockHint}), exact numerical quantities formatted as digits (e.g. ${qtyHint}), execution prices (e.g. "current market price", "CMP", limit rates, bhav), and client UCC codes (e.g. ${clientHint}).
 5. Label speakers as "Advisor:" and "Client:" where distinguishable.
 6. Do NOT output meta descriptions like "Hindi-English telephonic conversation". Return only the verbatim dialogue.`;
 
-  const whisperVocabPrompt = `Welspun Living, Bajaj Finserv, L&T Finance, Uno Minda, Tata Motors, Reliance, CMP, current market price, market rate, shares, quantity, client code, buy, sell, execute.`;
+  const whisperVocabPrompt = `Welspun Living, Bajaj Finserv, L&T Finance, Uno Minda, Tata Motors, Reliance, CMP, current market price, market rate, shares, quantity, client code, buy, sell, execute, Hindi, Tamil, Telugu, seri, sare, haan, theek hai.`;
 
   const baseConfigs: PassConfig[] = [
     // 1. Primary Gemini Multimodal Audio Passes (Top Priority for Accuracy)
     {
       engine: 'gemini',
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.6-flash',
       temperature: 0.1,
       prompt: geminiPromptDetailed,
-      description: 'Gemini 2.5 Flash Native Verbatim Audio Transcription (Primary)',
+      description: 'Gemini 3.6 Flash Native Verbatim Audio Transcription (Primary)',
     },
     {
       engine: 'gemini',
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.6-flash',
       temperature: 0.2,
       prompt: `${geminiPromptDetailed}\nFocus especially on acoustic clarity of numbers, share quantities, and market price expressions.`,
-      description: 'Gemini 2.5 Flash Acoustic Precision Audio Pass',
+      description: 'Gemini 3.6 Flash Acoustic Precision Audio Pass',
     },
     {
       engine: 'gemini',
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.6-flash',
       temperature: 0.0,
       prompt: `${geminiPromptDetailed}\nDeterministic strict verbatim transcript without omissions.`,
-      description: 'Gemini 2.5 Flash Deterministic Precision Audio Pass',
+      description: 'Gemini 3.6 Flash Deterministic Precision Audio Pass',
     },
     // 2. Groq Whisper Large-v3 with language='en' and vocabulary prompts
     {
@@ -146,10 +152,10 @@ CRITICAL INSTRUCTIONS:
     },
     {
       engine: 'gemini',
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.6-flash',
       temperature: 0.15,
       prompt: geminiPromptDetailed,
-      description: 'Gemini 2.5 Flash Conversational Focus Pass',
+      description: 'Gemini 3.6 Flash Conversational Focus Pass',
     },
     {
       engine: 'groq',
@@ -184,7 +190,7 @@ CRITICAL INSTRUCTIONS:
     return baseConfigs.map((cfg, idx) => ({
       ...cfg,
       engine: 'gemini' as const,
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.6-flash',
       temperature: (idx * 0.03) % 0.25,
       prompt: geminiPromptDetailed,
     })).slice(0, 10);

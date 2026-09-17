@@ -241,6 +241,14 @@ const NUMBER_WORDS_MAP: Record<string, number> = {
   dhai: 2.5,
   sawa: 1.25,
   paune: 0.75,
+  // Tamil spoken numbers
+  onnu: 1, ondru: 1, rendu: 2, irandu: 2, moonu: 3, moondru: 3, naalu: 4, naangu: 4,
+  anju: 5, aindhu: 5, aaru: 6, ezhu: 7, yezhu: 7, ettu: 8, onbadhu: 9, ombadhu: 9,
+  pathu: 10, pathinanju: 15, irubathu: 20, irubathi: 20, aimbathu: 50, nooru: 100, aayiram: 1000,
+  // Telugu spoken numbers
+  okati: 1, oka: 1, moodu: 3, naalugu: 4, nalugu: 4, aidu: 5, yedu: 7, edu: 7,
+  enimidi: 8, tommidi: 9, padi: 10, padhi: 10, padihenu: 15, iravai: 20, yabhai: 50,
+  yaabhai: 50, vanda: 100, vandha: 100, veyyi: 1000, vela: 1000,
 };
 
 /**
@@ -257,18 +265,18 @@ const NUMBER_WORDS_MAP: Record<string, number> = {
  *  - "dhai sau" -> 250
  *  - "do hazaar" -> 2000
  */
-// Map of spoken words strictly representing individual digits (English and Hindi)
+// Map of spoken words strictly representing individual digits (English, Hindi, Tamil, Telugu)
 const SINGLE_DIGIT_WORDS: Record<string, string> = {
-  zero: '0', shunya: '0', sunya: '0',
-  one: '1', ek: '1',
-  two: '2', do: '2',
-  three: '3', teen: '3',
-  four: '4', char: '4', chaar: '4',
-  five: '5', paanch: '5', panch: '5',
-  six: '6', chhe: '6', che: '6',
-  seven: '7', saat: '7',
-  eight: '8', aath: '8',
-  nine: '9', nau: '9',
+  zero: '0', shunya: '0', sunya: '0', sunna: '0', poojyam: '0', poojiyam: '0',
+  one: '1', ek: '1', onnu: '1', ondru: '1', okati: '1', oka: '1',
+  two: '2', do: '2', rendu: '2', irandu: '2',
+  three: '3', teen: '3', moonu: '3', moondru: '3', moodu: '3',
+  four: '4', char: '4', chaar: '4', naalu: '4', naangu: '4', naalugu: '4', nalugu: '4',
+  five: '5', paanch: '5', panch: '5', anju: '5', aindhu: '5', aidu: '5',
+  six: '6', chhe: '6', che: '6', aaru: '6',
+  seven: '7', saat: '7', ezhu: '7', yezhu: '7', yedu: '7', edu: '7',
+  eight: '8', aath: '8', ettu: '8', enimidi: '8',
+  nine: '9', nau: '9', onbadhu: '9', ombadhu: '9', tommidi: '9',
 };
 
 export function parseSpokenNumberPhrase(phrase: string): number | null {
@@ -413,7 +421,7 @@ export function parseSpokenNumberPhrase(phrase: string): number | null {
 export function normalizeSpokenNumbers(text: string): string {
   if (!text) return '';
   return text.replace(
-    /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|lakh|crore|ek|do|teen|char|paanch|chhe|saat|aath|nau|das|sau|hazaar|hazar|lakh|dedh|dhai|pachaas|bees|tees|chalis|saath|sattar|assi|nabbe|zero|shunya|sunya|double|triple)\b(?:\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|sau|hazaar|hazar|lakh|pachaas|bees|tees|chalis|zero|shunya|sunya|double|triple|ek|do|teen|char|paanch|chhe|saat|aath|nau|das))*/gi,
+    /\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|lakh|crore|ek|do|teen|char|paanch|chhe|saat|aath|nau|das|sau|hazaar|hazar|lakh|dedh|dhai|pachaas|bees|tees|chalis|saath|sattar|assi|nabbe|zero|shunya|sunya|double|triple|onnu|ondru|rendu|irandu|moonu|moondru|naalu|naangu|anju|aindhu|aaru|ezhu|yezhu|ettu|onbadhu|ombadhu|pathu|irubathu|aimbathu|nooru|aayiram|okati|oka|moodu|naalugu|nalugu|aidu|yedu|edu|enimidi|tommidi|padi|padhi|iravai|yabhai|yaabhai|vanda|vandha|veyyi|vela)\b(?:\s+(?:one|two|three|four|five|six|seven|eight|nine|ten|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|sau|hazaar|hazar|lakh|pachaas|bees|tees|chalis|zero|shunya|sunya|double|triple|ek|do|teen|char|paanch|chhe|saat|aath|nau|das|onnu|ondru|rendu|irandu|moonu|moondru|naalu|naangu|anju|aindhu|aaru|ezhu|yezhu|ettu|onbadhu|ombadhu|pathu|irubathu|aimbathu|nooru|aayiram|okati|oka|moodu|naalugu|nalugu|aidu|yedu|edu|enimidi|tommidi|padi|padhi|iravai|yabhai|yaabhai|vanda|vandha|veyyi|vela))*/gi,
     (match) => {
       const cleaned = match.trim().toLowerCase();
       const rawTokens = cleaned.split(/\s+/);
@@ -1116,10 +1124,14 @@ export function evaluateCustomerAcknowledgement(
 
   const lower = cleanedText.toLowerCase();
 
-  // Explicit rejection phrases
+  // Explicit rejection phrases (English, Hindi, Tamil, Telugu)
   const rejectionPatterns = [
     /\b(?:no|don't|do not|cancel|stop|wait|hold on|reject|disagree|wrong|nahi|mat karo|ruk jao|cancel karo|mat dalo)\b/i,
     /\b(?:not now|don't place|do not execute|don't want to proceed|not interested)\b/i,
+    // Tamil rejections
+    /\b(?:vendaam|vendam|pannadheenga|panadheenga|ippo vendaam|niruthunga|venam)\b/i,
+    // Telugu rejections
+    /\b(?:vaddu|oddu|cheyyoddu|cheyoddu|ippudu vaddu|aagandi|vaddule)\b/i,
   ];
 
   for (const rp of rejectionPatterns) {
@@ -1137,10 +1149,14 @@ export function evaluateCustomerAcknowledgement(
     }
   }
 
-  // Clear affirmative confirmation phrases
+  // Clear affirmative confirmation phrases (English, Hindi, Tamil, Telugu)
   const affirmativePatterns = [
     /\b(?:yes|yeah|yep|proceed|execute|confirm|confirmed|place the order|do it|done|agreed|approved)\b/i,
     /\b(?:haan|theek hai|kar do|laga do|dal do|daal do|sahi hai|chalega|ok proceed|yes please)\b/i,
+    // Tamil affirmative phrases
+    /\b(?:seri|seri pannunga|seri pannidunga|aamaa|aamaam|podunga|kandippa|vaangunga|vithudunga|pannalam)\b/i,
+    // Telugu affirmative phrases
+    /\b(?:sare|sare cheyyandi|avunu|avunandi|pettandi|alage|alage cheyyandi|thappakunda|kondi|ammeyandi)\b/i,
   ];
 
   for (const ap of affirmativePatterns) {
@@ -1311,6 +1327,31 @@ export const MARKET_PRICE_PHRASES = [
   'market me buy',
   'market buy',
   'market sell',
+  // Tamil market rate expressions
+  'market rate la',
+  'market rate le',
+  'market rate podunga',
+  'market vilai',
+  'current vilai',
+  'cmp la',
+  'current rate la',
+  'live rate la',
+  'bhav la',
+  'market la podunga',
+  'market la vaangunga',
+  'market la vithudunga',
+  // Telugu market rate expressions
+  'market rate lo',
+  'market rate lo pettandi',
+  'market vela',
+  'current vela',
+  'cmp lo',
+  'current rate lo',
+  'live rate lo',
+  'bhav lo',
+  'market lo pettandi',
+  'market lo konandi',
+  'market lo ammeyandi',
 ];
 
 export function mentionsMarketPriceOrCMP(transcript: string): boolean {
@@ -1319,8 +1360,8 @@ export function mentionsMarketPriceOrCMP(transcript: string): boolean {
   if (MARKET_PRICE_PHRASES.some((phrase) => lower.includes(phrase))) {
     return true;
   }
-  // Regex pattern for variations of market order / CMP / live rate / bhav
-  const cmpRegex = /\b(?:cmp|current\s*market\s*price|current\s*marker\s*price|marker\s*price|market\s*rate|at\s*market|bhav\s*(?:pe|par|per|se)|market\s*(?:pe|par|mein|me|order))\b/i;
+  // Regex pattern for variations of market order / CMP / live rate / bhav across English, Hindi, Tamil, Telugu
+  const cmpRegex = /\b(?:cmp|current\s*market\s*price|current\s*marker\s*price|marker\s*price|market\s*rate|at\s*market|bhav\s*(?:pe|par|per|se|la|lo)|market\s*(?:pe|par|mein|me|la|le|lo|order|podunga|pettandi))\b/i;
   return cmpRegex.test(transcript);
 }
 
@@ -1376,9 +1417,10 @@ export function matchQuantityInTranscript(targetQuantity: number, transcript: st
 
   // Explicit position liquidation / full holding exit confirmed verbally:
   // e.g. "sara bech do", "pura quantity exit", "full position square off", "all shares", "entire holding"
+  // Tamil: "motha shares", "mothama", Telugu: "motham", "anni shares"
   const fullExitPatterns = [
-    /\b(?:sara|saara|poora|pura|entire|complete|all)\s*(?:bech|exit|sell|square\s*off|shares?|holding|quantit(?:y|ies))\b/i,
-    /\b(?:full\s*position|full\s*quantity|all\s*shares|pura\s*exit|sara\s*exit)\b/i,
+    /\b(?:sara|saara|poora|pura|entire|complete|all|motha|mothum|mothama|anni)\s*(?:bech|exit|sell|square\s*off|shares?|holding|quantit(?:y|ies)|ammeyandi|vithudunga)\b/i,
+    /\b(?:full\s*position|full\s*quantity|all\s*shares|pura\s*exit|sara\s*exit|motham\s*exit)\b/i,
   ];
   if (fullExitPatterns.some((pat) => pat.test(lower))) {
     return true;
@@ -1403,29 +1445,29 @@ export function matchQuantityInTranscript(targetQuantity: number, transcript: st
     return true;
   }
 
-  // Spoken number words in Hindi and English
+  // Spoken number words in Hindi, English, Tamil, Telugu
   const spokenQtyMap: Record<number, string[]> = {
-    1: ['one', 'ek', 'single'],
-    2: ['two', 'do'],
-    3: ['three', 'teen'],
-    4: ['four', 'char', 'chaar'],
-    5: ['five', 'paanch', 'panch'],
-    6: ['six', 'chhe', 'che'],
-    7: ['seven', 'saat'],
-    8: ['eight', 'aath'],
-    9: ['nine', 'nau'],
-    10: ['ten', 'das'],
+    1: ['one', 'ek', 'single', 'onnu', 'ondru', 'okati', 'oka'],
+    2: ['two', 'do', 'rendu', 'irandu'],
+    3: ['three', 'teen', 'moonu', 'moondru', 'moodu'],
+    4: ['four', 'char', 'chaar', 'naalu', 'naangu', 'naalugu', 'nalugu'],
+    5: ['five', 'paanch', 'panch', 'anju', 'aindhu', 'aidu'],
+    6: ['six', 'chhe', 'che', 'aaru'],
+    7: ['seven', 'saat', 'ezhu', 'yezhu', 'yedu', 'edu'],
+    8: ['eight', 'aath', 'ettu', 'enimidi'],
+    9: ['nine', 'nau', 'onbadhu', 'ombadhu', 'tommidi'],
+    10: ['ten', 'das', 'pathu', 'padi', 'padhi'],
     12: ['twelve', 'barah', 'bara'],
-    15: ['fifteen', 'pandrah'],
+    15: ['fifteen', 'pandrah', 'pathinanju', 'padihenu'],
     16: ['sixteen', 'solah'],
-    20: ['twenty', 'bees'],
-    25: ['twenty five', 'pachis'],
-    50: ['fifty', 'pachaas', 'pachas'],
+    20: ['twenty', 'bees', 'irubathu', 'iravai'],
+    25: ['twenty five', 'pachis', 'pachees', 'irubathi aindhu', 'iruvathi anju', 'iravai aidu'],
+    50: ['fifty', 'pachaas', 'pachas', 'aimbathu', 'yabhai', 'yaabhai'],
     75: ['seventy five', 'pachhattar'],
-    100: ['hundred', 'sau', 'ek sau', 'one hundred'],
+    100: ['hundred', 'sau', 'ek sau', 'one hundred', 'nooru', 'vanda', 'vandha'],
     200: ['two hundred', 'do sau'],
-    500: ['five hundred', 'paansau'],
-    1000: ['thousand', 'hazaar'],
+    500: ['five hundred', 'paansau', 'ainooru'],
+    1000: ['thousand', 'hazaar', 'aayiram', 'veyyi', 'vela'],
   };
 
   const words = spokenQtyMap[Math.round(targetQuantity)] || [];

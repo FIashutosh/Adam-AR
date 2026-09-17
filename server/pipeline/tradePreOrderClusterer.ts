@@ -63,7 +63,9 @@ export interface DailyPreOrderBreakdown {
 }
 
 export interface TradePreOrdersSummary {
+  total_orders?: number;
   total_pre_orders: number;
+  mail_confirmations_count?: number;
   total_trades: number;
   total_unique_clients: number;
   total_matched_calls: number;
@@ -73,6 +75,19 @@ export interface TradePreOrdersSummary {
   daily_breakdown: DailyPreOrderBreakdown[];
   clusters: PreOrderTradeCluster[];
   algorithm_notes: string;
+}
+
+// Regulatory Pre-Order Window Mandate:
+// Pre-order calls are strictly defined as calls occurring between 09:14 AM and 03:40 PM
+// that resulted in an executed trade.
+export const PRE_ORDER_START_SECONDS = 9 * 3600 + 14 * 60; // 09:14:00 AM (33,240s)
+export const PRE_ORDER_END_SECONDS = 15 * 3600 + 40 * 60;   // 03:40:00 PM (56,400s)
+
+export function isWithinPreOrderWindow(timeStr?: string | null, dateStr?: string | null): boolean {
+  if (!timeStr && !dateStr) return true;
+  const sec = parseTradeSecondsFromMidnight(timeStr, dateStr);
+  if (sec === 0 && !timeStr) return true;
+  return sec >= PRE_ORDER_START_SECONDS && sec <= PRE_ORDER_END_SECONDS;
 }
 
 /**
@@ -202,6 +217,12 @@ export function calculatePreOrdersFromTrades(trades: TradeRecord[]): TradePreOrd
     const clientScriptMap = new Map<string, Map<string, TradeRecord[]>>();
 
     for (const t of dayTrades) {
+      // Regulatory pre-order trading hours window: 09:14 AM to 03:40 PM
+      const tradeSec = parseTradeSecondsFromMidnight(t.trade_time, t.trade_date);
+      if (tradeSec > 0 && (tradeSec < PRE_ORDER_START_SECONDS || tradeSec > PRE_ORDER_END_SECONDS)) {
+        continue;
+      }
+
       const rawClient = t.client || (t as any).client_code || '';
       const cleanUcc = formatCleanClientCode(rawClient) || String(rawClient).trim().toUpperCase();
       if (!cleanUcc) continue;
@@ -332,7 +353,9 @@ export function calculatePreOrdersFromTrades(trades: TradeRecord[]): TradePreOrd
   }
 
   return {
+    total_orders: allClusters.length,
     total_pre_orders: allClusters.length,
+    mail_confirmations_count: 0,
     total_trades: trades.length,
     total_unique_clients: allUniqueClients.size,
     total_matched_calls: 0,
@@ -341,7 +364,7 @@ export function calculatePreOrdersFromTrades(trades: TradeRecord[]): TradePreOrd
     coverage_percentage: 0,
     daily_breakdown: dailyBreakdowns,
     clusters: allClusters,
-    algorithm_notes: `Console Engine identified ${allClusters.length} pre-orders across ${allUniqueClients.size} unique clients from ${trades.length} executed trades (4-minute gap clustering rule applied).`,
+    algorithm_notes: `Console Engine identified ${allClusters.length} pre-orders across ${allUniqueClients.size} unique clients from ${trades.length} executed trades (09:14 AM - 03:40 PM window and 4-minute gap clustering applied).`,
   };
 }
 
@@ -400,6 +423,14 @@ export function matchPreOrdersWithCalls(db: DatabaseSync): TradePreOrdersSummary
     const clusterScript = cluster.symbol.toUpperCase();
 
     for (const call of calls) {
+      // Pre-order window: calls between 09:14 AM and 03:40 PM (if time recorded)
+      if (call.call_time) {
+        const callSec = parseTradeSecondsFromMidnight(call.call_time, call.call_date);
+        if (callSec > 0 && (callSec < PRE_ORDER_START_SECONDS || callSec > PRE_ORDER_END_SECONDS)) {
+          continue; // Outside pre-order execution window
+        }
+      }
+
       const callUcc = normalizeClientCode(call.client_code || call.client);
       const callPhone = normalizePhoneNumber(call.calling_number || call.phone_number || call.client_number);
       const transcript = call.transcript || '';
@@ -574,12 +605,15 @@ export function matchPreOrdersWithCalls(db: DatabaseSync): TradePreOrdersSummary
   }
 
   // Update summary totals
+  const mailConfirmCount = summary.clusters.filter((c) => c.match_status === 'CONFIRMED_VIA_MAIL').length;
+  summary.mail_confirmations_count = mailConfirmCount;
+  summary.total_orders = summary.total_pre_orders + mailConfirmCount;
   summary.total_matched_calls = matchedClusterIds.size;
   summary.missing_calls_count = Math.max(0, summary.total_pre_orders - summary.total_matched_calls);
   summary.coverage_percentage = summary.total_pre_orders > 0
     ? Math.round((summary.total_matched_calls / summary.total_pre_orders) * 100)
     : 0;
-  summary.algorithm_notes = `Console Engine matched ${summary.total_matched_calls} pre-order calls to ${summary.total_pre_orders} target pre-orders (${summary.coverage_percentage}% coverage). ${summary.missing_calls_count} orders pending call correlation or mail proof.`;
+  summary.algorithm_notes = `Console Engine matched ${summary.total_matched_calls} pre-order calls to ${summary.total_pre_orders} target pre-orders (${summary.coverage_percentage}% coverage). Formula: Total Orders (${summary.total_orders}) = Total Pre-Orders (${summary.total_pre_orders}) + Mail Confirmations (${summary.mail_confirmations_count}). ${summary.missing_calls_count} orders pending call correlation or mail proof.`;
 
   return summary;
 }
@@ -705,11 +739,15 @@ export function getPreOrdersAnalysisFromDb(db: DatabaseSync): TradePreOrdersSumm
         } catch {}
       }
 
+      const mailConfirmCount = summary.clusters.filter((c) => c.match_status === 'CONFIRMED_VIA_MAIL').length;
+      summary.mail_confirmations_count = mailConfirmCount;
+      summary.total_orders = summary.total_pre_orders + mailConfirmCount;
       summary.total_matched_calls = matchedCount;
       summary.missing_calls_count = Math.max(0, summary.total_pre_orders - matchedCount);
       summary.coverage_percentage = summary.total_pre_orders > 0
         ? Math.round((matchedCount / summary.total_pre_orders) * 100)
         : 0;
+      summary.algorithm_notes = `Console Engine identified ${summary.total_pre_orders} target pre-orders with ${matchedCount} matched calls and ${mailConfirmCount} mail confirmations. Formula: Total Orders (${summary.total_orders}) = Pre-Orders (${summary.total_pre_orders}) + Mail Confirmations (${mailConfirmCount}).`;
     } catch {}
 
     // Ensure all pre-order call matches produce matching scorecards

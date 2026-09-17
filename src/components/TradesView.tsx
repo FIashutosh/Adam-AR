@@ -122,7 +122,7 @@ export const TradesView: React.FC<TradesViewProps> = ({
             <div className="relative flex-1 w-full">
               <input
                 type="file"
-                accept=".csv,.xlsx,.txt"
+                accept=".csv,.xlsx,.xls,.tsv,.txt"
                 onChange={(e) => setTradeFile(e.target.files?.[0] || null)}
                 className="block w-full text-xs text-neutral-300 file:mr-3 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-gradient-to-r file:from-teal-400 file:to-emerald-500 file:text-slate-950 hover:file:brightness-110 cursor-pointer border border-white/10 rounded-xl p-1 glass-inner-subtle"
               />
@@ -245,8 +245,57 @@ export const TradesView: React.FC<TradesViewProps> = ({
           </div>
         )}
 
-        {/* 4 Core Quantitative Metrics */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+        {/* Regulatory Pre-Order & Order Formula Banner */}
+        <div className="mt-3 p-3 bg-teal-500/10 border border-teal-500/20 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-teal-400 shrink-0" />
+            <span className="text-teal-200 font-medium">
+              Regulatory Mandate:{' '}
+              <strong className="text-white font-mono">
+                Total Orders ({preOrdersSummary?.total_orders ?? (preOrdersSummary?.total_pre_orders ?? 0) + (preOrdersSummary?.mail_confirmations_count ?? 0)}) = Total Pre-Orders ({preOrdersSummary?.total_pre_orders ?? 0}) + Mail Confirmations ({preOrdersSummary?.mail_confirmations_count ?? 0})
+              </strong>
+            </span>
+          </div>
+          <span className="text-[11px] text-teal-300/80">
+            Window: 09:14 AM – 03:40 PM | Pre-order calls require executed trades
+          </span>
+        </div>
+
+        {/* 5 Core Quantitative Metrics */}
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-4">
+          <div className="glass-inner p-3.5 rounded-xl border border-teal-400/30 bg-teal-400/10">
+            <div className="flex items-center gap-1.5 text-teal-300 text-xs mb-1 font-semibold">
+              <TrendingUp className="w-3.5 h-3.5 text-teal-400" />
+              <span>Total Orders</span>
+            </div>
+            <div className="text-xl font-bold font-mono text-white">
+              {preOrdersSummary?.total_orders ?? ((preOrdersSummary?.total_pre_orders ?? 0) + (preOrdersSummary?.mail_confirmations_count ?? 0))}
+            </div>
+            <div className="text-[11px] text-teal-300/80 mt-0.5">Pre-Orders + Mail Proof</div>
+          </div>
+
+          <div className="glass-inner p-3.5 rounded-xl border border-white/10">
+            <div className="flex items-center gap-1.5 text-neutral-400 text-xs mb-1 font-semibold">
+              <Sparkles className="w-3.5 h-3.5 text-teal-400" />
+              <span>Target Pre-Orders</span>
+            </div>
+            <div className="text-xl font-bold font-mono text-teal-300">
+              {preOrdersSummary?.total_pre_orders ?? '—'}
+            </div>
+            <div className="text-[11px] text-neutral-400 mt-0.5">09:14 AM – 03:40 PM window</div>
+          </div>
+
+          <div className="glass-inner p-3.5 rounded-xl border border-white/10">
+            <div className="flex items-center gap-1.5 text-neutral-400 text-xs mb-1">
+              <MailCheck className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Mail Confirmations</span>
+            </div>
+            <div className="text-xl font-bold font-mono text-cyan-300">
+              {preOrdersSummary?.mail_confirmations_count ?? 0}
+            </div>
+            <div className="text-[11px] text-neutral-400 mt-0.5">Written email order proof</div>
+          </div>
+
           <div className="glass-inner p-3.5 rounded-xl border border-white/10">
             <div className="flex items-center gap-1.5 text-neutral-400 text-xs mb-1">
               <Users className="w-3.5 h-3.5 text-blue-400" />
@@ -255,35 +304,13 @@ export const TradesView: React.FC<TradesViewProps> = ({
             <div className="text-xl font-bold font-mono text-white">
               {preOrdersSummary?.total_unique_clients ?? '—'}
             </div>
-            <div className="text-[11px] text-neutral-400 mt-0.5">UCCs executed across dates</div>
-          </div>
-
-          <div className="glass-inner p-3.5 rounded-xl border border-white/10">
-            <div className="flex items-center gap-1.5 text-neutral-400 text-xs mb-1">
-              <TrendingUp className="w-3.5 h-3.5 text-teal-400" />
-              <span>Total Raw Trades</span>
-            </div>
-            <div className="text-xl font-bold font-mono text-teal-300">
-              {preOrdersSummary?.total_trades ?? trades.length}
-            </div>
-            <div className="text-[11px] text-neutral-400 mt-0.5">Individual fill executions</div>
-          </div>
-
-          <div className="glass-inner p-3.5 rounded-xl border border-teal-400/30 bg-teal-400/10">
-            <div className="flex items-center gap-1.5 text-teal-300 text-xs mb-1 font-semibold">
-              <Sparkles className="w-3.5 h-3.5 text-teal-400" />
-              <span>Target Pre-Orders</span>
-            </div>
-            <div className="text-xl font-bold font-mono text-white">
-              {preOrdersSummary?.total_pre_orders ?? '—'}
-            </div>
-            <div className="text-[11px] text-teal-300/80 mt-0.5">Exact orders from trade console</div>
+            <div className="text-[11px] text-neutral-400 mt-0.5">Authoritative UCC prefixes</div>
           </div>
 
           <div className="glass-inner p-3.5 rounded-xl border border-white/10">
             <div className="flex items-center gap-1.5 text-neutral-400 text-xs mb-1">
               <PhoneCall className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Pre-Order Calls Matched</span>
+              <span>Calls Matched</span>
             </div>
             <div className="text-xl font-bold font-mono text-emerald-400">
               {preOrdersSummary?.total_matched_calls ?? 0} / {preOrdersSummary?.total_pre_orders ?? 0}

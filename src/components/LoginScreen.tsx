@@ -176,6 +176,22 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({
                 )}
               </button>
             </div>
+
+            {/* Quick Demo Fill Helper */}
+            <div className="pt-1">
+              <button
+                id="login-quick-demo-btn"
+                type="button"
+                onClick={() => {
+                  setUsername('ashutosh.kumar@fundsindia.com');
+                  setPassword('Fi*119147');
+                }}
+                className="w-full py-2 px-3 rounded-lg bg-teal-950/50 border border-teal-500/30 text-xs text-teal-300 hover:bg-teal-900/50 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <span>Demo Admin Login:</span>
+                <span className="text-[10px] text-teal-400/80 font-mono">ashutosh.kumar@fundsindia.com</span>
+              </button>
+            </div>
           </form>
         </div>
 

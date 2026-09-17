@@ -121,32 +121,37 @@ Respond strictly with a valid JSON object matching this schema:
 
   if (geminiKey) {
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            responseMimeType: 'application/json',
-            temperature: 0.0,
-          },
-        }),
-      });
+      const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+      for (const model of modelsToTry) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`;
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: {
+                responseMimeType: 'application/json',
+                temperature: 0.0,
+              },
+            }),
+          });
 
-      if (response.ok) {
-        const json = await response.json();
-        const content = json.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (content) {
-          const parsed = JSON.parse(content);
-          return {
-            has_prohibited_promise: Boolean(parsed.has_prohibited_promise),
-            speaker: parsed.speaker === 'ADVISOR' || parsed.speaker === 'CLIENT' ? parsed.speaker : 'NONE',
-            quote: parsed.quote || '',
-            reason: parsed.reason || '',
-            confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.95,
-          };
-        }
+          if (response.ok) {
+            const json = await response.json();
+            const content = json.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (content) {
+              const parsed = JSON.parse(content);
+              return {
+                has_prohibited_promise: Boolean(parsed.has_prohibited_promise),
+                speaker: parsed.speaker === 'ADVISOR' || parsed.speaker === 'CLIENT' ? parsed.speaker : 'NONE',
+                quote: parsed.quote || '',
+                reason: parsed.reason || '',
+                confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.95,
+              };
+            }
+          }
+        } catch {}
       }
     } catch {}
   }

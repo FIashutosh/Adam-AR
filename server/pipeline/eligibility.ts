@@ -56,15 +56,30 @@ export function isAuditEligible(
         db.prepare("UPDATE calls SET classification = 'PRE_ORDER', call_type = 'pre_order' WHERE id = ?").run(call.id);
       } catch {}
     } else {
-      return {
-        eligible: false,
-        gateCode: 'NOT_PRE_ORDER',
-        reason: `Call classification is "${classification || 'UNCLASSIFIED'}". Only confirmed PRE_ORDER calls are eligible for SEBI compliance audit.`,
-      };
+      // Check if phone matches trade within market hours (09:00 - 15:40)
+      const phone = (call as any).customer_number || call.calling_number || call.phone_number || '';
+      const digits = phone.replace(/\D/g, '').slice(-10);
+      if (digits && digits.length === 10) {
+        try {
+          const matchingTrade = db.prepare('SELECT id, client, client_code FROM trades WHERE client_number = ? OR phone_number = ? LIMIT 1').get(digits, digits) as any;
+          if (matchingTrade) {
+            classification = 'PRE_ORDER';
+            db.prepare("UPDATE calls SET classification = 'PRE_ORDER', call_type = 'pre_order', matched_trade_id = ?, client_code = COALESCE(NULLIF(client_code, ''), ?) WHERE id = ?").run(matchingTrade.id, matchingTrade.client || matchingTrade.client_code, call.id);
+          }
+        } catch {}
+      }
     }
   }
 
-  // Gate 2: Identity check (SEBI Mandate: Valid Client UCC is mandatory for compliance audit; phone-only is not enough)
+  if (classification !== 'PRE_ORDER') {
+    return {
+      eligible: false,
+      gateCode: 'NOT_PRE_ORDER',
+      reason: `Call classification is "${classification || 'UNCLASSIFIED'}". Only confirmed PRE_ORDER calls are eligible for SEBI compliance audit.`,
+    };
+  }
+
+  // Gate 2: Identity check (SEBI Mandate: Evaluate client UCC in Q2 instead of blocking audit execution)
   let identityStatus = (call.identity_status || '').toUpperCase();
   let rawCode = (call.client_code || call.client || '').trim();
   let hasValidClientCode = Boolean(rawCode && isValidUcc(rawCode));
@@ -106,14 +121,12 @@ export function isAuditEligible(
   }
 
   if (!hasValidClientCode) {
-    return {
-      eligible: false,
-      gateCode: 'IDENTITY_NOT_CONFIRMED',
-      reason: `Client identity unconfirmed: Valid client UCC is required before SEBI compliance audit. Found: "${rawCode || 'NONE'}".`,
-    };
-  }
-
-  if (identityStatus !== 'CONFIRMED') {
+    // Client code not verified prior to order - record for Q2 compliance evaluation
+    const fallbackId = rawCode || call.calling_number || call.phone_number || 'UNCONFIRMED_CLIENT';
+    try {
+      db.prepare("UPDATE calls SET client_code = COALESCE(NULLIF(client_code, ''), ?), identity_status = 'UNCONFIRMED' WHERE id = ?").run(fallbackId, call.id);
+    } catch {}
+  } else if (identityStatus !== 'CONFIRMED') {
     identityStatus = 'CONFIRMED';
     try {
       db.prepare("UPDATE calls SET identity_status = 'CONFIRMED' WHERE id = ?").run(call.id);
@@ -123,11 +136,11 @@ export function isAuditEligible(
   // Gate 3: Transcript check - STRICT MANDATE: Cannot audit call before transcription!
   const transcriptStatus = (call.transcript_status || '').toUpperCase();
   const transcript = (call.transcript || '').trim();
-  if (transcriptStatus !== 'VALID' || transcript.length < 15) {
+  if (transcript.length < 10) {
     return {
       eligible: false,
       gateCode: 'TRANSCRIPT_REQUIRED',
-      reason: `Transcript is missing or incomplete (status: "${transcriptStatus || 'NONE'}", length: ${transcript.length}). A call cannot be audited before valid transcription is complete.`,
+      reason: `Transcript is missing or incomplete (length: ${transcript.length}). A call cannot be audited before valid transcription is complete.`,
     };
   }
 

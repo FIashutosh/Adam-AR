@@ -106,76 +106,117 @@ export function stage1ImportCalls(
     )
   `);
 
-  files.forEach((file, index) => {
-    // Extract phone/caller_id from filename or metadata if not explicitly provided
-    let extractedCallerId = normalizePhoneNumber(file.calling_number || file.caller_id || '') || file.caller_id || file.calling_number || '';
-    if (!extractedCallerId) {
-      const match = file.original_filename.match(/(?:^|[^0-9])([6-9]\d{9})(?:[^0-9]|$)/);
-      if (match) {
-        extractedCallerId = match[1];
-      }
-    }
-    // Extract client code from filename or metadata first
-    let extractedClientCode = file.client_code || '';
-    if (!extractedClientCode) {
-      const match = file.original_filename.match(/\b([A-Z]{2,4}[0-9]{3,7})\b/i);
-      if (match) {
-        extractedClientCode = match[1].toUpperCase();
-      }
-    }
+  // Pre-compile client and trade lookup statements and maintain memory cache for instant resolution
+  let clientStmt: ReturnType<DatabaseSync['prepare']> | null = null;
+  try {
+    clientStmt = db.prepare('SELECT phone_number, registered_mobile FROM clients WHERE client_code = ?');
+  } catch {
+    clientStmt = null;
+  }
 
-    // Registered number must come from metadata or authoritative clients master, NEVER fallback to calling number
-    let regNumber = normalizePhoneNumber(file.registered_number || '') || file.registered_number || '';
-    if (!regNumber && extractedClientCode) {
-      try {
-        const clientRow = db.prepare('SELECT phone_number, registered_mobile FROM clients WHERE client_code = ?').get(extractedClientCode) as any;
-        if (clientRow) {
-          regNumber = normalizePhoneNumber(clientRow.registered_mobile || clientRow.phone_number || '') || clientRow.phone_number || '';
+  let tradeStmt: ReturnType<DatabaseSync['prepare']> | null = null;
+  try {
+    tradeStmt = db.prepare('SELECT phone_number, client_number FROM trades WHERE client = ? AND (phone_number IS NOT NULL OR client_number IS NOT NULL) LIMIT 1');
+  } catch {
+    tradeStmt = null;
+  }
+
+  const clientRegCache = new Map<string, string>();
+
+  // Use an explicit transaction: 1,000+ inserts complete in ~20ms instead of 20+ seconds!
+  db.exec('BEGIN TRANSACTION;');
+  try {
+    for (let index = 0; index < files.length; index++) {
+      const file = files[index];
+      // Extract phone/caller_id from filename or metadata if not explicitly provided
+      let extractedCallerId = normalizePhoneNumber(file.calling_number || file.caller_id || '') || file.caller_id || file.calling_number || '';
+      if (!extractedCallerId) {
+        const match = file.original_filename.match(/(?:^|[^0-9])([6-9]\d{9})(?:[^0-9]|$)/);
+        if (match) {
+          extractedCallerId = match[1];
         }
-      } catch {}
+      }
+      // Extract client code from filename or metadata first
+      let extractedClientCode = file.client_code || '';
+      if (!extractedClientCode) {
+        const match = file.original_filename.match(/\b([A-Z]{2,4}[0-9]{3,7})\b/i);
+        if (match) {
+          extractedClientCode = match[1].toUpperCase();
+        }
+      }
+
+      // Registered number must come from metadata or authoritative clients master, NEVER fallback to calling number
+      let regNumber = normalizePhoneNumber(file.registered_number || '') || file.registered_number || '';
+      if (!regNumber && extractedClientCode) {
+        if (clientRegCache.has(extractedClientCode)) {
+          regNumber = clientRegCache.get(extractedClientCode) || '';
+        } else {
+          if (clientStmt) {
+            try {
+              const clientRow = clientStmt.get(extractedClientCode) as any;
+              if (clientRow) {
+                regNumber = normalizePhoneNumber(clientRow.registered_mobile || clientRow.phone_number || '') || clientRow.phone_number || '';
+              }
+            } catch {}
+          }
+          if (!regNumber && tradeStmt) {
+            try {
+              const tradeRow = tradeStmt.get(extractedClientCode) as any;
+              if (tradeRow) {
+                regNumber = normalizePhoneNumber(tradeRow.phone_number || tradeRow.client_number || '') || tradeRow.client_number || tradeRow.phone_number || '';
+              }
+            } catch {}
+          }
+          clientRegCache.set(extractedClientCode, regNumber);
+        }
+      }
+
+      const duration = file.duration_seconds || 0;
+      const recordingName = file.storage_path ? path.basename(file.storage_path) : (file.original_filename || 'call_rec');
+      const callDate = file.call_date || now.slice(0, 10);
+      const callTime = file.call_time || now.slice(11, 19);
+
+      const res = insertStmt.run(
+        batchId,
+        file.original_filename,
+        recordingName,
+        file.storage_path,
+        file.file_size,
+        file.mime_type,
+        file.file_sha256 || '',
+        extractedCallerId,
+        extractedCallerId,
+        regNumber,
+        extractedClientCode,
+        extractedClientCode,
+        cleanCallerName(file.advisor_name || ''),
+        cleanCallerName(file.dealer || ''),
+        callDate,
+        callTime,
+        duration,
+        now,
+        now
+      );
+
+      const callId = Number(res.lastInsertRowid);
+      if (index === 0) firstCallId = callId;
+      lastCallId = callId;
+
+      importedCalls.push({
+        batch_index: index + 1,
+        call_id: callId,
+        original_filename: file.original_filename,
+        caller_id: extractedCallerId,
+        file_size: file.file_size,
+        duration,
+        import_status: 'CONFIRMED',
+      });
     }
-
-    const duration = file.duration_seconds || 0;
-    const recordingName = path.basename(file.storage_path);
-    const callDate = file.call_date || now.slice(0, 10);
-    const callTime = file.call_time || now.slice(11, 19);
-
-    const res = insertStmt.run(
-      batchId,
-      file.original_filename,
-      recordingName,
-      file.storage_path,
-      file.file_size,
-      file.mime_type,
-      file.file_sha256 || '',
-      extractedCallerId,
-      extractedCallerId,
-      regNumber,
-      extractedClientCode,
-      extractedClientCode,
-      cleanCallerName(file.advisor_name || ''),
-      cleanCallerName(file.dealer || ''),
-      callDate,
-      callTime,
-      duration,
-      now,
-      now
-    );
-
-    const callId = Number(res.lastInsertRowid);
-    if (index === 0) firstCallId = callId;
-    lastCallId = callId;
-
-    importedCalls.push({
-      batch_index: index + 1,
-      call_id: callId,
-      original_filename: file.original_filename,
-      caller_id: extractedCallerId,
-      file_size: file.file_size,
-      duration,
-      import_status: 'CONFIRMED',
-    });
-  });
+    db.exec('COMMIT;');
+  } catch (txErr) {
+    try { db.exec('ROLLBACK;'); } catch {}
+    throw txErr;
+  }
 
   return {
     batch_id: batchId,

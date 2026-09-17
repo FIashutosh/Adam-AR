@@ -555,7 +555,7 @@ ${transcript.slice(0, 6000)}
       const { GoogleGenAI } = await import('@google/genai');
       const ai = new GoogleGenAI({ apiKey: geminiApiKey });
       const geminiRes = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
@@ -572,10 +572,10 @@ ${transcript.slice(0, 6000)}
           evidence_speaker: parsed.evidence_speaker || 'CLIENT',
           evidence_timestamp: parsed.evidence_timestamp || '00:00:15',
           reason: parsed.reason || 'Gemini semantic intent evaluation',
-          model_used: 'gemini-2.5-flash',
+          model_used: 'gemini-3.6-flash',
           prompt_version: 'v18.0.0',
         };
-        primaryModel = 'gemini-2.5-flash';
+        primaryModel = 'gemini-3.6-flash';
       }
     } catch {
       // Continue to deterministic fallback

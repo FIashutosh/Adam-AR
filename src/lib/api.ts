@@ -143,6 +143,24 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groq_key: key }),
     }),
+  testDeepgram: (key?: string) =>
+    apiRequest<{ ok: boolean; message?: string; error?: string; latency_ms?: number }>('/api/integrations/test-deepgram', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deepgram_key: key }),
+    }),
+  testGemini: (key?: string) =>
+    apiRequest<{ ok: boolean; message?: string; error?: string; latency_ms?: number }>('/api/integrations/test-gemini', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ gemini_key: key }),
+    }),
+  checkPipelineConnection: () =>
+    apiRequest<{
+      ok: boolean;
+      timestamp: string;
+      checks: Record<string, { status: 'healthy' | 'warning' | 'error'; message: string; latency_ms?: number }>;
+    }>('/api/pipeline/connection-check'),
   getDiagnostics: () => apiRequest<any>('/api/diagnostics'),
   getLogs: (perPage = 100) => apiRequest<LogEntry[]>(`/api/logs?per_page=${perPage}`),
 

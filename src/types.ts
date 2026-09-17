@@ -585,6 +585,8 @@ export interface SystemIntegrations {
   audit_model: string;
   groq_audit_model: string;
   groq_configured: boolean;
+  deepgram_configured?: boolean;
+  gemini_configured?: boolean;
   tata_configured: boolean;
   tata_account_id?: string;
   tata_api_url?: string;
@@ -696,7 +698,9 @@ export interface DailyPreOrderBreakdown {
 }
 
 export interface TradePreOrdersSummary {
+  total_orders?: number;
   total_pre_orders: number;
+  mail_confirmations_count?: number;
   total_trades: number;
   total_unique_clients: number;
   total_matched_calls: number;

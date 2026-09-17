@@ -12,6 +12,7 @@
 // =============================================================
 
 import type { DatabaseSync } from 'node:sqlite';
+import fs from 'node:fs';
 import { stage2ResolveIdentity } from './identity';
 import { stage3TranscribeCall } from './transcription';
 import { stage3_5AttributeSpeakers } from './speakers';
@@ -33,6 +34,7 @@ export interface PipelineWorkerStatus {
   lastActiveTime: string;
   hasGroqKey: boolean;
   hasGeminiKey: boolean;
+  hasDeepgramKey?: boolean;
   statusMessage: string;
   queueDepth: number;
 }
@@ -40,8 +42,8 @@ export interface PipelineWorkerStatus {
 let isWorkerLoopActive = false;
 let isHeartbeatRunning = false;
 const activeProcessingCallIds = new Set<number>();
-// Robust concurrency: 4 parallel workers prevents SQLite write lock contention and memory thrashing
-const MAX_CONCURRENT_PIPELINE_WORKERS = 4;
+// High-speed parallel worker concurrency for 1000+ call batches
+const MAX_CONCURRENT_PIPELINE_WORKERS = 8;
 let lastHeartbeatTime = new Date().toISOString();
 let totalProcessedCount = 0;
 let rateLimitPauseUntil = 0;
@@ -111,7 +113,8 @@ export async function runFullPipelineForCall(
   db: DatabaseSync,
   callId: number,
   groqApiKey?: string,
-  geminiApiKey?: string
+  geminiApiKey?: string,
+  deepgramApiKey?: string
 ): Promise<{ success: boolean; stage: string; details: any }> {
   ensureCallColumns(db);
   const call = db.prepare('SELECT * FROM calls WHERE id = ?').get(callId) as unknown as CallRecord | undefined;
@@ -123,6 +126,7 @@ export async function runFullPipelineForCall(
   db.prepare("UPDATE calls SET processing_status = 'PROCESSING', updated_at = ? WHERE id = ?").run(now, callId);
 
   const activeGeminiKey = geminiApiKey || process.env.GEMINI_API_KEY;
+  const activeDeepgramKey = deepgramApiKey || process.env.DEEPGRAM_API_KEY;
 
   try {
     // ---------------------------------------------------------
@@ -173,12 +177,36 @@ export async function runFullPipelineForCall(
     `).run(now, callId);
 
     // ---------------------------------------------------------
-    // STAGE 3: TRANSCRIPTION (Google Gemini 3.5 Transcribe)
+    // STAGE 3: TRANSCRIPTION (Deepgram Nova-2 / Gemini 3.5 Transcribe)
     // ---------------------------------------------------------
     let currentCall = db.prepare('SELECT * FROM calls WHERE id = ?').get(callId) as unknown as CallRecord;
     if (currentCall.transcript_status !== 'VALID' || !currentCall.transcript) {
-      console.log(`[Pipeline] Call #${callId} -> Stage 3: Transcription (Gemini 3.5 Transcribe)`);
-      await stage3TranscribeCall(db, callId, groqApiKey, activeGeminiKey);
+      const audioPath = currentCall.storage_path;
+      if (!audioPath || !fs.existsSync(audioPath)) {
+        console.warn(`[Pipeline] Call #${callId} -> No physical audio file on disk (${audioPath || 'EMPTY'}). Routing to Missing Call / Mail Confirmation audit.`);
+        db.prepare(`
+          UPDATE calls SET
+            classification = 'REVIEW',
+            call_type = 'review',
+            status = 'review',
+            audit_status = 'MISSING_AUDIO',
+            processing_status = 'COMPLETED',
+            pipeline_stage = 'MISSING_RECORDING',
+            current_gate = 'GATE_3',
+            gate_reason = 'Physical audio recording was not provided or missing from storage.',
+            failure_reason = 'Physical audio recording missing from disk/upload. Routed to Missing Call / Mail Confirmation audit.',
+            updated_at = ?
+          WHERE id = ?
+        `).run(now, callId);
+
+        return {
+          success: true,
+          stage: 'MISSING_RECORDING',
+          details: { reason: 'No physical audio recording on disk' },
+        };
+      }
+      console.log(`[Pipeline] Call #${callId} -> Stage 3: Transcription (Deepgram Nova-2 / Gemini 3.5)`);
+      await stage3TranscribeCall(db, callId, groqApiKey, activeGeminiKey, activeDeepgramKey);
     }
     db.prepare(`
       UPDATE calls SET
@@ -569,6 +597,29 @@ export async function runFullPipelineForCall(
     const isTransient = isRateLimit || (err.message && (err.message.includes('ETIMEDOUT') || err.message.includes('ECONNRESET') || err.message.includes('fetch failed')));
 
     const currentRetry = ((call.retry_count as number) || 0) + 1;
+    if (currentRetry >= 5) {
+      console.warn(`[Pipeline] Call #${callId} -> Exceeded 5 retries. Marking as COMPLETED with status 'review' for manual compliance inspection.`);
+      db.prepare(`
+        UPDATE calls SET
+          processing_status = 'COMPLETED',
+          status = 'review',
+          failure_reason = ?,
+          pipeline_stage = 'FAILED_MAX_RETRIES',
+          current_gate = 'GATE_ERROR',
+          gate_reason = ?,
+          retry_count = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(
+        `Exceeded maximum retries (5): ${err.message}`,
+        `Exceeded maximum retries (5): ${err.message}`,
+        currentRetry,
+        now,
+        callId
+      );
+      return { success: false, stage: 'FAILED_MAX_RETRIES', details: { error: err.message } };
+    }
+
     // CRITICAL SELF-HEALING: Under no circumstances leave processing_status as 'PROCESSING'!
     // Always release back to 'IDLE' and 'retry_pending' so the autonomous supervisor automatically re-does the failed job.
     db.prepare(`
@@ -601,7 +652,8 @@ export async function runFullPipelineForCall(
 export async function stepAutonomousPipelineWorker(
   db: DatabaseSync,
   getGroqKey: () => string | undefined,
-  getGeminiKey?: () => string | undefined
+  getGeminiKey?: () => string | undefined,
+  getDeepgramKey?: () => string | undefined
 ): Promise<boolean> {
   ensureCallColumns(db);
   lastHeartbeatTime = new Date().toISOString();
@@ -627,12 +679,11 @@ export async function stepAutonomousPipelineWorker(
     UPDATE calls SET
       processing_status = 'IDLE',
       status = 'retry_pending',
+      pipeline_stage = CASE WHEN pipeline_stage = 'AUDIT_GATE_BLOCKED' THEN 'CLASSIFICATION' ELSE pipeline_stage END,
       updated_at = ?
-    WHERE transcript_status = 'VALID'
-      AND transcript IS NOT NULL AND length(trim(transcript)) > 0
-      AND (audit_status IS NULL OR audit_status = 'PENDING')
-      AND (pipeline_stage IS NULL OR pipeline_stage NOT IN ('COMPLETED', 'SCRAP_EXIT', 'REGULAR_EXIT', 'REVIEW_PENDING', 'AUDIT_GATE_BLOCKED'))
-      AND status NOT IN ('audited', 'scrap', 'regular', 'review', 'blocked', 'rejected')
+    WHERE transcript IS NOT NULL AND length(trim(transcript)) > 0
+      AND (audit_status IS NULL OR audit_status != 'AUDITED')
+      AND status NOT IN ('audited', 'scrap', 'regular', 'review', 'blocked')
       AND (processing_status != 'PROCESSING' OR updated_at < ?)
       AND (processing_status != 'IDLE' OR status NOT IN ('retry_pending', 'pending'))
   `).run(nowIso, twoMinutesAgo);
@@ -660,9 +711,10 @@ export async function stepAutonomousPipelineWorker(
 
   const groqKey = getGroqKey();
   const geminiKey = getGeminiKey ? getGeminiKey() : process.env.GEMINI_API_KEY;
+  const deepgramKey = getDeepgramKey ? getDeepgramKey() : process.env.DEEPGRAM_API_KEY;
 
   // 1c. Self-Healing: If API keys are now configured, unblock previously blocked calls
-  if ((groqKey && groqKey.trim()) || (geminiKey && geminiKey.trim())) {
+  if ((groqKey && groqKey.trim()) || (geminiKey && geminiKey.trim()) || (deepgramKey && deepgramKey.trim())) {
     db.prepare(`
       UPDATE calls SET
         processing_status = 'IDLE',
@@ -694,6 +746,36 @@ export async function stepAutonomousPipelineWorker(
     `).run(nowIso);
   } catch {}
 
+  // 1e. Clean Missing-Audio routing:
+  // Calls where physical recording is absent are routed cleanly so workers focus on valid recordings
+  try {
+    const missingAudioCalls = db.prepare(`
+      SELECT id, storage_path FROM calls
+      WHERE (processing_status = 'IDLE' OR processing_status IS NULL OR status IN ('pending', 'imported', 'retry_pending'))
+        AND status NOT IN ('audited', 'scrap', 'regular', 'review')
+        AND (transcript IS NULL OR length(trim(transcript)) = 0)
+    `).all() as { id: number; storage_path: string }[];
+
+    for (const mac of missingAudioCalls) {
+      if (!mac.storage_path || !fs.existsSync(mac.storage_path)) {
+        db.prepare(`
+          UPDATE calls SET
+            classification = 'REVIEW',
+            call_type = 'review',
+            status = 'review',
+            audit_status = 'MISSING_AUDIO',
+            processing_status = 'COMPLETED',
+            pipeline_stage = 'MISSING_RECORDING',
+            current_gate = 'GATE_3',
+            gate_reason = 'Physical audio recording was not provided or missing from storage.',
+            failure_reason = 'Physical audio recording missing from disk/upload. Routed to Missing Call / Mail Confirmation audit.',
+            updated_at = ?
+          WHERE id = ?
+        `).run(nowIso, mac.id);
+      }
+    }
+  } catch {}
+
   // Check concurrency limit
   if (activeProcessingCallIds.size >= MAX_CONCURRENT_PIPELINE_WORKERS) {
     return false;
@@ -709,7 +791,7 @@ export async function stepAutonomousPipelineWorker(
       AND (processing_status = 'IDLE' OR status = 'retry_pending')
       AND status NOT IN ('audited', 'scrap', 'regular', 'review')
       AND duration_seconds > 0 AND duration_seconds < 6
-    ORDER BY id ASC
+    ORDER BY COALESCE(retry_count, 0) ASC, id ASC
     LIMIT 1
   `).get() as { id: number } | undefined;
 
@@ -719,13 +801,11 @@ export async function stepAutonomousPipelineWorker(
     nextCall = db.prepare(`
       SELECT id FROM calls
       WHERE id NOT IN (${activeIdsList})
-        AND (processing_status = 'IDLE' OR processing_status IS NULL OR status = 'retry_pending' OR status = 'transcribed' OR status = 'imported')
-        AND status NOT IN ('audited', 'scrap', 'regular', 'review', 'blocked', 'rejected')
-        AND (pipeline_stage IS NULL OR pipeline_stage NOT IN ('COMPLETED', 'SCRAP_EXIT', 'REGULAR_EXIT', 'REVIEW_PENDING', 'AUDIT_GATE_BLOCKED'))
-        AND transcript_status = 'VALID'
-        AND transcript IS NOT NULL AND length(transcript) > 0
+        AND status NOT IN ('audited', 'scrap', 'regular', 'review')
         AND (audit_status != 'AUDITED' OR audit_status IS NULL)
-      ORDER BY id ASC
+        AND transcript IS NOT NULL AND length(trim(transcript)) > 0
+        AND (processing_status = 'IDLE' OR processing_status IS NULL OR status IN ('retry_pending', 'transcribed', 'imported', 'pending', 'blocked', 'processing'))
+      ORDER BY COALESCE(retry_count, 0) ASC, id ASC
       LIMIT 1
     `).get() as { id: number } | undefined;
   }
@@ -736,11 +816,10 @@ export async function stepAutonomousPipelineWorker(
     nextCall = db.prepare(`
       SELECT id FROM calls
       WHERE id NOT IN (${activeIdsList})
-        AND (processing_status = 'IDLE' OR processing_status IS NULL OR status = 'retry_pending' OR status = 'imported' OR status = 'pending')
-        AND status NOT IN ('audited', 'scrap', 'regular', 'review', 'blocked', 'rejected')
-        AND (pipeline_stage IS NULL OR pipeline_stage NOT IN ('COMPLETED', 'SCRAP_EXIT', 'REGULAR_EXIT', 'REVIEW_PENDING', 'AUDIT_GATE_BLOCKED'))
-        AND (audit_status != 'AUDITED' OR audit_status IS NULL)
-      ORDER BY id ASC
+        AND status NOT IN ('audited', 'scrap', 'regular', 'review')
+        AND (transcript IS NULL OR length(trim(transcript)) = 0)
+        AND (processing_status = 'IDLE' OR processing_status IS NULL OR status IN ('retry_pending', 'imported', 'pending', 'ai_blocked', 'processing', 'failed', 'error'))
+      ORDER BY COALESCE(retry_count, 0) ASC, id ASC
       LIMIT 1
     `).get() as { id: number } | undefined;
   }
@@ -751,7 +830,7 @@ export async function stepAutonomousPipelineWorker(
 
   // For non-scrap calls needing ASR, verify API keys.
   // If keys are missing, mark calls as AI_BLOCKED so UI/Diagnostics clearly report it!
-  if ((!groqKey || !groqKey.trim()) && (!geminiKey || !geminiKey.trim())) {
+  if ((!groqKey || !groqKey.trim()) && (!geminiKey || !geminiKey.trim()) && (!deepgramKey || !deepgramKey.trim())) {
     const callRec = db.prepare('SELECT duration_seconds, transcript FROM calls WHERE id = ?').get(nextCall.id) as { duration_seconds: number; transcript?: string } | undefined;
     const needsAsr = !callRec?.transcript && (!callRec || callRec.duration_seconds === 0 || callRec.duration_seconds >= 6);
     if (needsAsr) {
@@ -759,7 +838,7 @@ export async function stepAutonomousPipelineWorker(
         UPDATE calls SET
           processing_status = 'AI_BLOCKED',
           status = 'ai_blocked',
-          failure_reason = 'AWAITING_API_KEY: Gemini or Groq API key is required to transcribe audio recordings.',
+          failure_reason = 'AWAITING_API_KEY: Deepgram, Gemini, or Groq API key is required to transcribe audio recordings.',
           updated_at = ?
         WHERE (processing_status = 'IDLE' OR status = 'retry_pending')
           AND (transcript IS NULL OR length(trim(transcript)) = 0)
@@ -790,7 +869,7 @@ export async function stepAutonomousPipelineWorker(
 
   activeProcessingCallIds.add(nextCall.id);
   try {
-    await runFullPipelineForCall(db, nextCall.id, groqKey, geminiKey);
+    await runFullPipelineForCall(db, nextCall.id, groqKey, geminiKey, deepgramKey);
     totalProcessedCount++;
     return true;
   } catch (err: any) {
@@ -814,12 +893,13 @@ export async function stepAutonomousPipelineWorker(
 export function start24x7WorkerSupervisor(
   db: DatabaseSync,
   getGroqKey: () => string | undefined,
-  getGeminiKey?: () => string | undefined
+  getGeminiKey?: () => string | undefined,
+  getDeepgramKey?: () => string | undefined
 ): void {
   if (isHeartbeatRunning) return;
   isHeartbeatRunning = true;
 
-  console.log('[AuditEQ] 24/7 Autonomous Pipeline Supervisor initialized with Gemini 3.5 Transcribe protection & multi-worker concurrency.');
+  console.log('[AuditEQ] 24/7 Autonomous Pipeline Supervisor initialized with Deepgram & Gemini multi-worker concurrency.');
   ensureCallColumns(db);
 
   let isTickRunning = false;
@@ -833,7 +913,7 @@ export function start24x7WorkerSupervisor(
         const promises: Promise<boolean>[] = [];
         for (let i = 0; i < needed; i++) {
           promises.push(
-            stepAutonomousPipelineWorker(db, getGroqKey, getGeminiKey).catch((err: any) => {
+            stepAutonomousPipelineWorker(db, getGroqKey, getGeminiKey, getDeepgramKey).catch((err: any) => {
               console.error('[Autonomous Worker Async Error]:', err?.message);
               return false;
             })
@@ -855,7 +935,8 @@ export function start24x7WorkerSupervisor(
 export function getPipelineWorkerStatus(
   db: DatabaseSync,
   groqKey?: string,
-  geminiKey?: string
+  geminiKey?: string,
+  deepgramKey?: string
 ): PipelineWorkerStatus {
   const queueDepth = (
     db.prepare(`
@@ -869,11 +950,19 @@ export function getPipelineWorkerStatus(
   const hasGroq = Boolean(groqKey && groqKey.trim());
   const activeGeminiKey = geminiKey || process.env.GEMINI_API_KEY;
   const hasGemini = Boolean(activeGeminiKey && activeGeminiKey.trim());
+  const activeDeepgramKey = deepgramKey || process.env.DEEPGRAM_API_KEY;
+  const hasDeepgram = Boolean(activeDeepgramKey && activeDeepgramKey.trim());
 
-  let statusMessage = '24/7 Autonomous AI Worker Active (Gemini 3.5 Transcribe Protected)';
-  if (!hasGemini && !hasGroq) {
-    statusMessage = 'Awaiting API Key (enter GEMINI_API_KEY or GROQ_API_KEY in Settings to activate AI processing)';
-  } else if (geminiTranscribeLimiter.isRateLimited()) {
+  let statusMessage = '24/7 Autonomous AI Worker Active';
+  if (hasDeepgram) {
+    statusMessage = '24/7 Autonomous AI Worker Active (Deepgram Nova-2 Ultra-Fast ASR & Continuous Audit)';
+  } else if (hasGemini) {
+    statusMessage = '24/7 Autonomous AI Worker Active (Gemini 3.5 Transcribe Protected)';
+  }
+
+  if (!hasGemini && !hasGroq && !hasDeepgram) {
+    statusMessage = 'Awaiting API Key (enter DEEPGRAM_API_KEY, GEMINI_API_KEY or GROQ_API_KEY in Settings to activate AI processing)';
+  } else if (!hasDeepgram && geminiTranscribeLimiter.isRateLimited()) {
     const remaining = geminiTranscribeLimiter.getRemainingCooldownSec();
     statusMessage = `Gemini 3.5 rate-limit cooldown active (${remaining}s remaining). Resuming automatically.`;
   } else if (Date.now() < rateLimitPauseUntil) {
@@ -906,6 +995,7 @@ export function getPipelineWorkerStatus(
     lastActiveTime: lastHeartbeatTime,
     hasGroqKey: hasGroq,
     hasGeminiKey: hasGemini,
+    hasDeepgramKey: hasDeepgram,
     statusMessage,
     queueDepth,
   };

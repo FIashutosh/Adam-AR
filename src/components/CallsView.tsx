@@ -132,21 +132,55 @@ export const CallsView: React.FC<CallsViewProps> = ({
 
   const handleUploadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!uploadFiles || uploadFiles.length === 0) return;
-
-    const fd = new FormData();
-    for (let i = 0; i < uploadFiles.length; i++) {
-      fd.append('files[]', uploadFiles[i], uploadFiles[i].name);
-    }
-    if (uploadMeta) {
-      fd.append('metadata', uploadMeta, uploadMeta.name);
-    }
+    if ((!uploadFiles || uploadFiles.length === 0) && !uploadMeta) return;
 
     setIsUploading(true);
-    setUploadStatus('Uploading recordings, extracting Caller ID from filenames, resolving metadata & trades...');
+    const totalAudioFiles = uploadFiles ? uploadFiles.length : 0;
+
     try {
-      await onUploadCalls(fd);
-      setUploadStatus(`Upload completed successfully! Ingested calls and resolved metadata automatically.`);
+      if (totalAudioFiles === 0 && uploadMeta) {
+        // Direct CDR / Metadata spreadsheet upload
+        const fd = new FormData();
+        fd.append('metadata', uploadMeta, uploadMeta.name);
+        setUploadStatus(`Uploading Call Detail Records (${uploadMeta.name}) and ingesting metadata...`);
+        await onUploadCalls(fd);
+        setUploadStatus(`Upload completed successfully! Ingested Call Detail Records from ${uploadMeta.name}.`);
+      } else if (totalAudioFiles > 150) {
+        // For large batches (150+ individual files), upload in smooth concurrent chunks of 100 files
+        const CHUNK_SIZE = 100;
+        let uploadedCount = 0;
+        for (let i = 0; i < totalAudioFiles; i += CHUNK_SIZE) {
+          const chunkFiles = Array.from(uploadFiles!).slice(i, i + CHUNK_SIZE);
+          const fd = new FormData();
+          for (const f of chunkFiles) {
+            fd.append('files[]', f, f.name);
+          }
+          // Attach companion metadata spreadsheet to first chunk
+          if (i === 0 && uploadMeta) {
+            fd.append('metadata', uploadMeta, uploadMeta.name);
+          }
+
+          setUploadStatus(`Uploading ${uploadedCount + chunkFiles.length} of ${totalAudioFiles} recordings... (${Math.round(((uploadedCount + chunkFiles.length) / totalAudioFiles) * 100)}%)`);
+          await onUploadCalls(fd);
+          uploadedCount += chunkFiles.length;
+        }
+        setUploadStatus(`Completed! Successfully ingested all ${totalAudioFiles} recordings.`);
+      } else {
+        // Direct single-request upload for archives (e.g. ZIP) or standard batch sizes
+        const fd = new FormData();
+        if (uploadFiles) {
+          for (let i = 0; i < uploadFiles.length; i++) {
+            fd.append('files[]', uploadFiles[i], uploadFiles[i].name);
+          }
+        }
+        if (uploadMeta) {
+          fd.append('metadata', uploadMeta, uploadMeta.name);
+        }
+        setUploadStatus('Uploading recordings, extracting Caller ID from filenames, resolving metadata & trades...');
+        await onUploadCalls(fd);
+        setUploadStatus(`Upload completed successfully! Ingested ${totalAudioFiles || 'CDR'} call(s) and resolved metadata.`);
+      }
+
       setUploadFiles(null);
       setUploadMeta(null);
       if (onRefresh) await onRefresh();
@@ -466,16 +500,16 @@ export const CallsView: React.FC<CallsViewProps> = ({
             <div className="p-4 glass-inner-subtle border border-dashed border-white/20 rounded-xl hover:border-teal-400/60 transition-colors">
               <div className="flex items-center gap-2 mb-2">
                 <FileText className="w-4 h-4 text-teal-400" />
-                <span className="text-xs font-bold text-neutral-100">Companion Metadata Spreadsheet (Optional)</span>
+                <span className="text-xs font-bold text-neutral-100">Companion Metadata or CDR Spreadsheet</span>
               </div>
               <input
                 type="file"
-                accept=".xlsx,.xls,.csv"
+                accept=".xlsx,.xls,.csv,.tsv,.txt"
                 onChange={(e) => setUploadMeta(e.target.files?.[0] || null)}
                 className="w-full text-xs text-neutral-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-white/10 file:text-neutral-200 hover:file:bg-white/20 file:cursor-pointer cursor-pointer"
               />
               <p className="text-[11px] text-neutral-400 mt-1.5">
-                Contains Caller ID &rarr; Registered Client Number &rarr; Date &rarr; Duration correlation.
+                Contains Caller ID &rarr; Registered Client Number &rarr; Date &rarr; Duration correlation or standalone Call Detail Records.
               </p>
             </div>
           </div>
@@ -487,14 +521,18 @@ export const CallsView: React.FC<CallsViewProps> = ({
                   Ready to ingest {uploadFiles.length} file(s)
                   {uploadMeta ? ` + metadata (${uploadMeta.name})` : ''}
                 </span>
+              ) : uploadMeta ? (
+                <span className="text-teal-400 font-medium">
+                  Ready to ingest Call Detail Records / metadata from {uploadMeta.name}
+                </span>
               ) : (
-                'Select audio recordings or ZIP archive to begin ingestion'
+                'Select audio recordings, ZIP archive, or CDR spreadsheet to begin ingestion'
               )}
             </div>
 
             <button
               type="submit"
-              disabled={isUploading || !uploadFiles || uploadFiles.length === 0}
+              disabled={isUploading || ((!uploadFiles || uploadFiles.length === 0) && !uploadMeta)}
               className="px-5 py-2.5 bg-gradient-to-r from-teal-400 to-emerald-500 hover:brightness-110 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-xl shadow-lg shadow-teal-500/20 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
             >
               <Upload className="w-4 h-4" />

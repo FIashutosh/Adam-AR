@@ -40,6 +40,25 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
   // Groq State
   const [groqKey, setGroqKey] = useState('');
   const [showGroqKey, setShowGroqKey] = useState(false);
+  const [deepgramKey, setDeepgramKey] = useState('');
+  const [showDeepgramKey, setShowDeepgramKey] = useState(false);
+  const [isTestingDeepgram, setIsTestingDeepgram] = useState(false);
+  const [deepgramTestResult, setDeepgramTestResult] = useState<string | null>(null);
+
+  // Gemini State
+  const [geminiKey, setGeminiKey] = useState('');
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
+  const [isTestingGemini, setIsTestingGemini] = useState(false);
+  const [geminiTestResult, setGeminiTestResult] = useState<string | null>(null);
+
+  // Pipeline Diagnostics State
+  const [pipelineCheck, setPipelineCheck] = useState<{
+    ok: boolean;
+    timestamp: string;
+    checks: Record<string, { status: 'healthy' | 'warning' | 'error'; message: string; latency_ms?: number }>;
+  } | null>(null);
+  const [isCheckingPipeline, setIsCheckingPipeline] = useState(false);
+
   const [transcriptionModel, setTranscriptionModel] = useState('whisper-large-v3');
   const [auditModel, setAuditModel] = useState('openai/gpt-oss-120b');
   const [groqTestResult, setGroqTestResult] = useState<string | null>(null);
@@ -103,7 +122,61 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
       if (integrations.smtp_from_name) setSmtpFromName(integrations.smtp_from_name);
       if (integrations.smtp_secure !== undefined) setSmtpSecure(integrations.smtp_secure);
     }
+    // Auto-check pipeline connection on component mount
+    runPipelineCheck();
   }, [integrations]);
+
+  const runPipelineCheck = async () => {
+    setIsCheckingPipeline(true);
+    try {
+      const res = await api.checkPipelineConnection();
+      setPipelineCheck(res);
+    } catch (err: any) {
+      setPipelineCheck({
+        ok: false,
+        timestamp: new Date().toISOString(),
+        checks: {
+          pipeline: { status: 'error', message: `Pipeline check failed: ${err.message}` },
+        },
+      });
+    } finally {
+      setIsCheckingPipeline(false);
+    }
+  };
+
+  const handleTestDeepgram = async () => {
+    setIsTestingDeepgram(true);
+    setDeepgramTestResult('Testing Deepgram Nova-2 connection…');
+    try {
+      const res = await api.testDeepgram(deepgramKey.trim() || undefined);
+      if (res.ok) {
+        setDeepgramTestResult(res.message || 'Deepgram Nova-2 connection verified successfully!');
+      } else {
+        setDeepgramTestResult(`Deepgram test failed: ${res.error || 'Please check your key'}`);
+      }
+    } catch (err: any) {
+      setDeepgramTestResult(`Deepgram test failed: ${err.message}`);
+    } finally {
+      setIsTestingDeepgram(false);
+    }
+  };
+
+  const handleTestGemini = async () => {
+    setIsTestingGemini(true);
+    setGeminiTestResult('Testing Google Gemini connection…');
+    try {
+      const res = await api.testGemini(geminiKey.trim() || undefined);
+      if (res.ok) {
+        setGeminiTestResult(res.message || 'Google Gemini connection verified successfully!');
+      } else {
+        setGeminiTestResult(`Gemini test failed: ${res.error || 'Please check your key'}`);
+      }
+    } catch (err: any) {
+      setGeminiTestResult(`Gemini test failed: ${err.message}`);
+    } finally {
+      setIsTestingGemini(false);
+    }
+  };
 
   const handleTestGroq = async () => {
     setIsTestingGroq(true);
@@ -298,8 +371,16 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
         payload.groq_key = groqKey.trim();
       }
 
+      if (deepgramKey.trim()) {
+        payload.deepgram_api_key = deepgramKey.trim();
+      }
+
       if (tataKey.trim()) {
         payload.tata_api_key = tataKey.trim();
+      }
+
+      if (geminiKey.trim()) {
+        payload.gemini_api_key = geminiKey.trim();
       }
 
       if (smtpPass.trim()) {
@@ -309,6 +390,8 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
       await onSaveIntegrations(payload);
       setSaveStatus('All integration settings (Tata Teleservices, SMTP Mail, and AI Models) saved successfully.');
       setGroqKey('');
+      setDeepgramKey('');
+      setGeminiKey('');
       setTataKey('');
       setSmtpPass('');
     } catch (err: unknown) {
@@ -339,6 +422,84 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
             <span>Encrypted Server-Side Storage</span>
           </span>
         </div>
+      </div>
+
+      {/* Live Connection Pipeline Health & Diagnostics */}
+      <div className="glass-panel p-5 rounded-2xl shadow-xl border border-teal-500/25 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-teal-500/15">
+          <div className="flex items-center gap-2.5">
+            <span className="p-1.5 rounded-lg bg-teal-500/20 text-teal-300 border border-teal-500/40">
+              <Zap className="w-4 h-4 text-teal-400" />
+            </span>
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <span>Real-Time Connection Pipeline Status</span>
+                <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-teal-500/15 text-teal-300 border border-teal-500/30">
+                  Live Status
+                </span>
+              </h3>
+              <p className="text-[11px] text-slate-300">
+                Continuous verification across Database, Deepgram ASR, Engine Models, and 24x7 Pipeline Worker queues.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={runPipelineCheck}
+            disabled={isCheckingPipeline}
+            className="px-4 py-2 bg-gradient-to-r from-teal-400 to-emerald-500 hover:brightness-110 disabled:opacity-50 text-slate-950 font-bold text-xs rounded-xl shadow-md shadow-teal-500/20 transition-all flex items-center gap-2 cursor-pointer self-start sm:self-auto shrink-0"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isCheckingPipeline ? 'animate-spin' : ''}`} />
+            <span>{isCheckingPipeline ? 'Auditing Pipeline…' : 'Run Pipeline Check'}</span>
+          </button>
+        </div>
+
+        {pipelineCheck && (
+          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-3">
+            {Object.entries(pipelineCheck.checks).map(([serviceKey, check]) => {
+              const isHealthy = check.status === 'healthy';
+              const isWarn = check.status === 'warning';
+              return (
+                <div
+                  key={serviceKey}
+                  className={`p-3 rounded-xl border flex flex-col justify-between space-y-2 ${
+                    isHealthy
+                      ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-200'
+                      : isWarn
+                      ? 'bg-amber-950/40 border-amber-500/30 text-amber-200'
+                      : 'bg-rose-950/40 border-rose-500/30 text-rose-200'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold capitalize text-white">
+                      {serviceKey.replace('_', ' ')}
+                    </span>
+                    <span
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${
+                        isHealthy
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                          : isWarn
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                          : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                      }`}
+                    >
+                      {check.status}
+                    </span>
+                  </div>
+                  <div className="text-[11px] line-clamp-3 leading-relaxed opacity-90">
+                    {check.message}
+                  </div>
+                  {check.latency_ms !== undefined && (
+                    <div className="text-[10px] font-mono text-teal-300 pt-1 border-t border-white/10">
+                      Latency: {check.latency_ms}ms
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <form onSubmit={handleSave} className="space-y-6">
@@ -914,10 +1075,102 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+            {/* DEEPGRAM API KEY */}
+            <div>
+              <label className="block font-bold text-slate-200 mb-1 flex items-center justify-between">
+                <span>DEEPGRAM_API_KEY</span>
+                <span className="text-[10px] text-teal-400 font-normal">Nova-2 Ultra-Fast ASR</span>
+              </label>
+              <div className="relative">
+                <input
+                  type={showDeepgramKey ? 'text' : 'password'}
+                  value={deepgramKey}
+                  onChange={(e) => setDeepgramKey(e.target.value)}
+                  placeholder={
+                    integrations?.deepgram_configured
+                      ? '•••••••••••••••• (Configured — enter to update)'
+                      : 'Enter Deepgram API Key…'
+                  }
+                  className="w-full pl-3 pr-9 py-2 glass-input rounded-xl text-xs font-mono text-white focus:border-teal-400 focus:outline-hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowDeepgramKey(!showDeepgramKey)}
+                  className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-200 cursor-pointer"
+                  title={showDeepgramKey ? 'Hide key' : 'Show key'}
+                >
+                  {showDeepgramKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-[10px] text-slate-400">
+                  Fast speech-to-text engine (10-30x real-time speed).
+                </span>
+                <button
+                  type="button"
+                  onClick={handleTestDeepgram}
+                  disabled={isTestingDeepgram}
+                  className="text-[10px] text-teal-300 hover:text-teal-200 font-semibold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                >
+                  <Sparkles className={`w-3 h-3 ${isTestingDeepgram ? 'animate-spin' : ''}`} />
+                  <span>{isTestingDeepgram ? 'Testing…' : 'Test Deepgram'}</span>
+                </button>
+              </div>
+              {deepgramTestResult && (
+                <div className="mt-2 p-2 rounded-lg bg-teal-950/40 border border-teal-500/20 text-[11px] text-teal-200 font-mono">
+                  {deepgramTestResult}
+                </div>
+              )}
+            </div>
+
+            {/* GOOGLE GEMINI API KEY */}
+            <div>
+              <label className="block font-bold text-slate-200 mb-1 flex items-center justify-between">
+                <span>GEMINI_API_KEY</span>
+                <span className="text-[10px] text-teal-400 font-normal">Gemini 2.5/3.5 Pro &amp; Flash</span>
+              </label>
+              <div className="relative">
+                <input
+                  type={showGeminiKey ? 'text' : 'password'}
+                  value={geminiKey}
+                  onChange={(e) => setGeminiKey(e.target.value)}
+                  placeholder="Enter Gemini API Key (or uses environment key)…"
+                  className="w-full pl-3 pr-9 py-2 glass-input rounded-xl text-xs font-mono text-white focus:border-teal-400 focus:outline-hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowGeminiKey(!showGeminiKey)}
+                  className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-200 cursor-pointer"
+                  title={showGeminiKey ? 'Hide key' : 'Show key'}
+                >
+                  {showGeminiKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-[10px] text-slate-400">
+                  SEBI compliance auditing &amp; reasoning engine.
+                </span>
+                <button
+                  type="button"
+                  onClick={handleTestGemini}
+                  disabled={isTestingGemini}
+                  className="text-[10px] text-teal-300 hover:text-teal-200 font-semibold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                >
+                  <Sparkles className={`w-3 h-3 ${isTestingGemini ? 'animate-spin' : ''}`} />
+                  <span>{isTestingGemini ? 'Testing…' : 'Test Gemini'}</span>
+                </button>
+              </div>
+              {geminiTestResult && (
+                <div className="mt-2 p-2 rounded-lg bg-teal-950/40 border border-teal-500/20 text-[11px] text-teal-200 font-mono">
+                  {geminiTestResult}
+                </div>
+              )}
+            </div>
+
             {/* ENGINE API KEY */}
             <div>
               <label className="block font-bold text-slate-200 mb-1">
-                ENGINE_API_KEY *
+                GROQ_API_KEY *
               </label>
               <div className="relative">
                 <input
@@ -927,7 +1180,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
                   placeholder={
                     integrations?.groq_configured
                       ? '•••••••••••••••• (Configured — enter to update)'
-                      : 'Enter Engine API Key…'
+                      : 'Enter Groq Engine API Key…'
                   }
                   className="w-full pl-3 pr-9 py-2 glass-input rounded-xl text-xs font-mono text-white focus:border-teal-400 focus:outline-hidden"
                 />
@@ -941,7 +1194,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
                 </button>
               </div>
               <div className="text-[10px] text-slate-400 mt-1">
-                Private transcription &amp; compliance evaluation key.
+                Ultra-fast transcription &amp; compliance evaluation key.
               </div>
             </div>
 
@@ -986,7 +1239,7 @@ export const IntegrationsView: React.FC<IntegrationsViewProps> = ({
                 className="w-full px-4 py-2 glass-inner hover:bg-teal-500/15 text-slate-200 font-bold rounded-xl border border-teal-500/25 text-xs transition-colors cursor-pointer flex items-center justify-center gap-2 active:scale-95"
               >
                 <Sparkles className={`w-3.5 h-3.5 text-teal-400 ${isTestingGroq ? 'animate-spin' : ''}`} />
-                <span>{isTestingGroq ? 'Testing Connection…' : 'Test Engine Connection'}</span>
+                <span>{isTestingGroq ? 'Testing Groq…' : 'Test Groq Engine'}</span>
               </button>
             </div>
           </div>

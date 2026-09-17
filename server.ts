@@ -25,6 +25,7 @@ import type {
 import {
   normalizePhoneNumber,
   normalizeClientCode,
+  formatCleanClientCode,
   matchClientCodeInTranscript,
   matchSymbolInTranscript,
   matchPriceInTranscript,
@@ -98,11 +99,15 @@ process.on('uncaughtException', (err, origin) => {
 
 const PORT = 3000;
 const VERSION = '17.0.28';
+const prodDb = path.join(process.cwd(), '.data', 'auditeq_production.db');
+const standardDb = path.join(process.cwd(), '.data', 'auditeq.db');
 const DB_PATH =
   process.env.DATABASE_PATH ||
-  (fs.existsSync(path.join(process.cwd(), '.data', 'auditeq.db'))
-    ? path.join(process.cwd(), '.data', 'auditeq.db')
-    : path.join(process.cwd(), '.data', 'auditeq_production.db'));
+  (fs.existsSync(prodDb) && fs.statSync(prodDb).size > 0
+    ? prodDb
+    : (fs.existsSync(standardDb) && fs.statSync(standardDb).size > 0
+        ? standardDb
+        : prodDb));
 const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(process.cwd(), '.data', 'uploads');
 const DATABASES_DIR = process.env.DATABASES_DIR || path.join(process.cwd(), '.data', 'databases');
 
@@ -134,35 +139,42 @@ const upload = multer({
   },
 });
 
-// Default SEBI Compliance Rubric (4-Point Scale: Q1 to Q4)
+// Default SEBI Compliance Rubric (5-Point Scale: Q1 to Q5)
 const DEFAULT_RUBRIC: RubricItem[] = [
   {
     id: 'Q1',
     question: "Confirmation given in the Customer's Registered / authorised Number ?",
     fatal: true,
-    weight: 0.25,
+    weight: 0.2,
     rule: 'PASS only when calling number matches registered number or client is authenticated via spoken OTP/security questions. If registered number is missing, mark REVIEW. If mismatched & unverified, mark FAIL (FATAL).',
   },
   {
     id: 'Q2',
     question: 'Was the client code explicitly confirmed before the order?',
     fatal: true,
-    weight: 0.25,
+    weight: 0.2,
     rule: 'PASS only when the adviser or client explicitly confirms the client code in the call transcript prior to order placement.',
   },
   {
     id: 'Q3',
     question: 'Were stock name, price and quantity explicitly confirmed before the order?',
     fatal: false,
-    weight: 0.25,
-    rule: 'PASS only when the adviser mentions all three trade details: stock name, price and quantity. If any one is missing, FAIL and deduct one mark.',
+    weight: 0.2,
+    rule: 'PASS only when the adviser mentions trade parameters (stock name, price, quantity/CMP). Dialogue matching trade parameters passes. If 0% match, FAIL and deduct one mark.',
   },
   {
     id: 'Q4',
     question: 'Customer Acknowledge the same?',
     fatal: false,
-    weight: 0.25,
-    rule: 'Assess customer acknowledgement from the transcript when there is clear evidence (affirmative consent, "yes", "okay", "execute"). This parameter is non-fatal (-1 mark if missing).',
+    weight: 0.2,
+    rule: 'Assess customer acknowledgement from dialogue (consent, yes, okay, execute). Evaluated under regulatory guidance.',
+  },
+  {
+    id: 'Q5',
+    question: 'No guarantee of return or profit assurance was given by the adviser?',
+    fatal: true,
+    weight: 0.2,
+    rule: 'PASS if advisor strictly adhered to SEBI non-promissory norms. FAIL (FATAL) if advisor gave verbal promise/assurance of returns or guaranteed profit.',
   },
 ];
 
@@ -212,30 +224,6 @@ try {
   console.warn('[AuditEQ Database] Integrity check notice:', (e as Error).message);
 }
 
-// User Mandate: Sanitize caller/advisor names in database (remove phone suffix (+91...) or numbers in parentheses)
-try {
-  sqlite.exec(`
-    UPDATE calls 
-    SET caller_name = TRIM(SUBSTR(caller_name, 1, INSTR(caller_name, '(') - 1)) 
-    WHERE caller_name LIKE '%(%';
-
-    UPDATE scorecards 
-    SET caller_name = TRIM(SUBSTR(caller_name, 1, INSTR(caller_name, '(') - 1)) 
-    WHERE caller_name LIKE '%(%';
-
-    UPDATE audits 
-    SET caller_name = TRIM(SUBSTR(caller_name, 1, INSTR(caller_name, '(') - 1)) 
-    WHERE caller_name LIKE '%(%';
-
-    UPDATE trades 
-    SET advisor_name = TRIM(SUBSTR(advisor_name, 1, INSTR(advisor_name, '(') - 1)) 
-    WHERE advisor_name LIKE '%(%';
-  `);
-  console.log('[AuditEQ Database] Caller name phone-suffix cleanup completed.');
-} catch (cleanErr) {
-  console.warn('[AuditEQ Database] Caller name cleanup warning:', cleanErr);
-}
-
 // Automatic backup function to prevent data loss
 function backupDatabase(): void {
   try {
@@ -278,6 +266,16 @@ sqlite.exec(`
     token TEXT,
     token_expires_at TEXT,
     created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS clients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_code TEXT UNIQUE NOT NULL,
+    name TEXT,
+    phone_number TEXT,
+    registered_mobile TEXT,
+    email TEXT,
+    created_at TEXT
   );
 
   CREATE TABLE IF NOT EXISTS calls (
@@ -678,6 +676,28 @@ for (const col of pipelineCols) {
   } catch {}
 }
 
+// User Mandate: Sanitize caller/advisor names in database (remove phone suffix (+91...) or numbers in parentheses)
+try {
+  sqlite.exec(`
+    UPDATE calls 
+    SET caller_name = TRIM(SUBSTR(caller_name, 1, INSTR(caller_name, '(') - 1)) 
+    WHERE caller_name LIKE '%(%';
+  `);
+  sqlite.exec(`
+    UPDATE scorecards 
+    SET caller_name = TRIM(SUBSTR(caller_name, 1, INSTR(caller_name, '(') - 1)) 
+    WHERE caller_name LIKE '%(%';
+  `);
+  sqlite.exec(`
+    UPDATE trades 
+    SET advisor_name = TRIM(SUBSTR(advisor_name, 1, INSTR(advisor_name, '(') - 1)) 
+    WHERE advisor_name LIKE '%(%';
+  `);
+  console.log('[AuditEQ Database] Caller name phone-suffix cleanup completed.');
+} catch (cleanErr) {
+  console.warn('[AuditEQ Database] Caller name cleanup notice:', (cleanErr as Error).message);
+}
+
 // Initialize Default Settings
 function initSettings() {
   const getSetting = sqlite.prepare('SELECT value FROM settings WHERE key = ?');
@@ -1039,10 +1059,10 @@ function setSettingValue(key: string, value: string) {
 
 function getGroqKey(): string {
   const fromDb = getSettingValue('groq_key');
-  if (fromDb && fromDb.trim() && !fromDb.startsWith('gsk_mXsemJ59lmSwpd6t')) {
+  if (fromDb && fromDb.trim()) {
     return fromDb.trim();
   }
-  if (process.env.GROQ_API_KEY && process.env.GROQ_API_KEY.trim() && !process.env.GROQ_API_KEY.startsWith('gsk_mXsemJ59lmSwpd6t')) {
+  if (process.env.GROQ_API_KEY && process.env.GROQ_API_KEY.trim()) {
     return process.env.GROQ_API_KEY.trim();
   }
   return '';
@@ -1053,6 +1073,15 @@ function getGeminiKey(): string {
     return process.env.GEMINI_API_KEY.trim();
   }
   const fromDb = getSettingValue('gemini_api_key');
+  if (fromDb && fromDb.trim()) return fromDb.trim();
+  return '';
+}
+
+function getDeepgramKey(): string {
+  if (process.env.DEEPGRAM_API_KEY && process.env.DEEPGRAM_API_KEY.trim()) {
+    return process.env.DEEPGRAM_API_KEY.trim();
+  }
+  const fromDb = getSettingValue('deepgram_api_key');
   if (fromDb && fromDb.trim()) return fromDb.trim();
   return '';
 }
@@ -1310,58 +1339,163 @@ function cleanNumber(val: unknown): number {
   return 0;
 }
 
+function scoreHeaderTokens(tokens: any[]): number {
+  const recognizedWords = [
+    'symbol', 'scrip', 'script', 'security', 'stock', 'instrument', 'tradingsymbol', 'scripcode', 'tokenname',
+    'qty', 'quantity', 'trdqty', 'tradedqty', 'tradeqty', 'execqty', 'executedqty', 'shares', 'volume', 'units', 'lots', 'dealqty',
+    'price', 'rate', 'trdprice', 'tradeprice', 'avgprice', 'netrate', 'execprice', 'limitprice', 'cmp', 'orderprice', 'wap',
+    'client', 'ucc', 'partycode', 'account', 'clientcode', 'clientid', 'custid', 'customercode', 'ucccode', 'clicode',
+    'dealer', 'dealerid', 'dealercode', 'terminal', 'terminalid', 'trader', 'userid', 'ctclid',
+    'advisor', 'advisorname', 'agent', 'executive', 'caller', 'callername', 'username',
+    'date', 'tradedate', 'orderdate', 'transdate', 'calldate', 'time', 'tradetime', 'ordertime', 'calltime',
+    'phone', 'mobile', 'regmobile', 'registeredmobile', 'contact', 'customernumber', 'callingnumber', 'cli',
+    'side', 'buysell', 'bs', 'action', 'type', 'ordertype',
+    'recording', 'recordingname', 'recordingfile', 'recordingurl', 'callid', 'duration', 'talktime', 'disposition', 'source', 'destination', 'campaign', 'direction'
+  ];
+  let matches = 0;
+  for (const t of tokens) {
+    const norm = String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!norm || norm.length < 2) continue;
+    if (recognizedWords.some((rw) => norm.includes(rw) || rw.includes(norm))) {
+      matches++;
+    }
+  }
+  return matches;
+}
+
+function detectTextDelimiter(text: string): string {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0).slice(0, 20);
+  const candidates = [',', '\t', '|', ';', '~'];
+  let bestDelim = ',';
+  let maxCount = 0;
+  for (const d of candidates) {
+    let total = 0;
+    for (const line of lines) {
+      total += line.split(d).length - 1;
+    }
+    if (total > maxCount) {
+      maxCount = total;
+      bestDelim = d;
+    }
+  }
+  return bestDelim;
+}
+
+function splitDelimitedLine(line: string, delim: string): string[] {
+  if (delim === ',') {
+    const res: string[] = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') {
+        if (inQuotes && line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (c === delim && !inQuotes) {
+        res.push(cur.trim());
+        cur = '';
+      } else {
+        cur += c;
+      }
+    }
+    res.push(cur.trim());
+    return res;
+  }
+  return line.split(delim).map((s) => s.trim().replace(/^["']|["']$/g, ''));
+}
+
 function parseSpreadsheetRows(filePath: string): Record<string, any>[] {
-  const buffer = fs.readFileSync(filePath);
-  const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true });
-  const sheetName = workbook.SheetNames[0];
-  if (!sheetName) return [];
-  const worksheet = workbook.Sheets[sheetName];
+  const ext = path.extname(filePath).toLowerCase();
 
-  // First try standard sheet_to_json
-  const defaultRows: Record<string, any>[] = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
-  if (defaultRows.length === 0) return [];
+  // Try Delimited Text Parser first for text/csv files, or as fallback
+  const tryTextParse = (): Record<string, any>[] => {
+    try {
+      const rawText = fs.readFileSync(filePath, 'utf-8').replace(/^\uFEFF/, '');
+      const delim = detectTextDelimiter(rawText);
+      const lines = rawText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+      if (lines.length === 0) return [];
 
-  // Check if keys in defaultRows look like actual column names
-  const sampleKeys = Object.keys(defaultRows[0] || {}).map((k) => k.toLowerCase().replace(/[^a-z0-9]/g, ''));
-  const hasRecognizedCols = sampleKeys.some(
-    (k) =>
-      k.includes('symbol') ||
-      k.includes('scrip') ||
-      k.includes('client') ||
-      k.includes('dealer') ||
-      k.includes('qty') ||
-      k.includes('quantity') ||
-      k.includes('price') ||
-      k.includes('rate') ||
-      k.includes('date')
-  );
+      // Find optimal header row within first 30 lines
+      let bestHeaderIdx = -1;
+      let maxScore = 0;
+      for (let r = 0; r < Math.min(lines.length, 30); r++) {
+        const tokens = splitDelimitedLine(lines[r], delim);
+        const score = scoreHeaderTokens(tokens);
+        if (score > maxScore) {
+          maxScore = score;
+          bestHeaderIdx = r;
+        }
+      }
 
-  if (hasRecognizedCols) {
-    return defaultRows;
+      if (bestHeaderIdx >= 0 && maxScore >= 2) {
+        const headers = splitDelimitedLine(lines[bestHeaderIdx], delim).map((h) => h.trim());
+        const rows: Record<string, any>[] = [];
+        for (let i = bestHeaderIdx + 1; i < lines.length; i++) {
+          const rowVals = splitDelimitedLine(lines[i], delim);
+          if (rowVals.length === 0 || rowVals.every((v) => !v)) continue;
+          // Check if summary row (Total, Grand Total, etc.)
+          const rowJoined = rowVals.join(' ').toLowerCase();
+          if (rowJoined.startsWith('total') || rowJoined.startsWith('grand total') || rowJoined.startsWith('report generated')) {
+            continue;
+          }
+          const obj: Record<string, any> = {};
+          for (let j = 0; j < headers.length; j++) {
+            const h = headers[j];
+            if (h) {
+              obj[h] = rowVals[j] ?? '';
+            }
+          }
+          rows.push(obj);
+        }
+        return rows;
+      }
+    } catch {}
+    return [];
+  };
+
+  if (ext === '.csv' || ext === '.txt' || ext === '.tsv') {
+    const textRows = tryTextParse();
+    if (textRows.length > 0) return textRows;
   }
 
-  // If header might be offset by title rows, search row-by-row
-  const rawMatrix: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
-  for (let r = 0; r < Math.min(rawMatrix.length, 10); r++) {
-    const rowValues = (rawMatrix[r] || []).map((v) => String(v).toLowerCase().replace(/[^a-z0-9]/g, ''));
-    const isHeaderRow = rowValues.some(
-      (v) =>
-        v.includes('symbol') ||
-        v.includes('scrip') ||
-        v.includes('client') ||
-        v.includes('dealer') ||
-        v.includes('qty') ||
-        v.includes('quantity') ||
-        v.includes('price') ||
-        v.includes('rate')
-    );
+  // Standard XLSX / XLS parser with deep header matrix search
+  try {
+    const buffer = fs.readFileSync(filePath);
+    const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+    const sheetName = workbook.SheetNames[0];
+    if (!sheetName) return tryTextParse();
+    const worksheet = workbook.Sheets[sheetName];
 
-    if (isHeaderRow) {
-      const headers = (rawMatrix[r] || []).map((v) => String(v).trim());
+    const rawMatrix: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+    if (!rawMatrix || rawMatrix.length === 0) return tryTextParse();
+
+    // Find the true header row with highest score among top 30 rows
+    let bestHeaderRow = -1;
+    let maxScore = 0;
+
+    for (let r = 0; r < Math.min(rawMatrix.length, 30); r++) {
+      const rowTokens = rawMatrix[r] || [];
+      const score = scoreHeaderTokens(rowTokens);
+      if (score > maxScore) {
+        maxScore = score;
+        bestHeaderRow = r;
+      }
+    }
+
+    if (bestHeaderRow >= 0 && maxScore >= 2) {
+      const headers = (rawMatrix[bestHeaderRow] || []).map((v) => String(v).trim());
       const rows: Record<string, any>[] = [];
-      for (let i = r + 1; i < rawMatrix.length; i++) {
+      for (let i = bestHeaderRow + 1; i < rawMatrix.length; i++) {
         const row = rawMatrix[i];
-        if (!row || row.length === 0 || row.every((c: any) => c === '')) continue;
+        if (!row || row.length === 0 || row.every((c: any) => c === '' || c === null || c === undefined)) continue;
+        const rowJoined = row.map((c: any) => String(c)).join(' ').toLowerCase();
+        if (rowJoined.startsWith('total') || rowJoined.startsWith('grand total') || rowJoined.startsWith('report generated')) {
+          continue;
+        }
         const obj: Record<string, any> = {};
         for (let j = 0; j < headers.length; j++) {
           if (headers[j]) {
@@ -1370,11 +1504,17 @@ function parseSpreadsheetRows(filePath: string): Record<string, any>[] {
         }
         rows.push(obj);
       }
-      return rows;
+      if (rows.length > 0) return rows;
     }
+
+    // Default fallback
+    const defaultRows: Record<string, any>[] = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+    if (defaultRows.length > 0) return defaultRows;
+  } catch (err: any) {
+    console.warn(`[SpreadsheetParser] XLSX error for ${filePath}, falling back to text:`, err?.message);
   }
 
-  return defaultRows;
+  return tryTextParse();
 }
 
 function normalizeKey(k: string): string {
@@ -1450,7 +1590,7 @@ function parseTradeRecordsFromFile(filePath: string): ParsedTradeRow[] {
         new Date().toTimeString().slice(0, 8)
     ).trim();
 
-    let client = String(
+    let rawClient = String(
       normMap['clientcode'] ??
         normMap['client'] ??
         normMap['ucc'] ??
@@ -1463,7 +1603,7 @@ function parseTradeRecordsFromFile(filePath: string): ParsedTradeRow[] {
         ''
     ).trim();
 
-    if (!client) {
+    if (!rawClient) {
       for (const [k, v] of Object.entries(normMap)) {
         if (
           (k.includes('client') || k.includes('ucc') || k.includes('party') || k.includes('account')) &&
@@ -1471,15 +1611,21 @@ function parseTradeRecordsFromFile(filePath: string): ParsedTradeRow[] {
         ) {
           const val = String(v ?? '').trim();
           if (val) {
-            client = val;
+            rawClient = val;
             break;
           }
         }
       }
     }
 
-    let clientNumber = String(
-      normMap['clientregisterednumber'] ??
+    let client = formatCleanClientCode(rawClient) || rawClient.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (['UNKNOWN', 'NA', 'N/A', 'NULL', 'NONE', 'UNDEFINED'].includes(client)) {
+      client = '';
+    }
+
+    let rawClientNumber = String(
+      normMap['number'] ??
+        normMap['clientregisterednumber'] ??
         normMap['registerednumber'] ??
         normMap['registeredmobile'] ??
         normMap['registeredmobileno'] ??
@@ -1493,7 +1639,6 @@ function parseTradeRecordsFromFile(filePath: string): ParsedTradeRow[] {
         normMap['clientcontactnumber'] ??
         normMap['clientnumber'] ??
         normMap['customernumber'] ??
-        normMap['number'] ??
         normMap['phone'] ??
         normMap['phonenumber'] ??
         normMap['mobile'] ??
@@ -1505,22 +1650,26 @@ function parseTradeRecordsFromFile(filePath: string): ParsedTradeRow[] {
       .replace(/[^0-9+]/g, '')
       .trim();
 
-    if (!clientNumber) {
+    if (!rawClientNumber) {
       for (const [k, v] of Object.entries(normMap)) {
         if (
           (k.includes('reg') && (k.includes('num') || k.includes('mob') || k.includes('phone'))) ||
           k.includes('mobile') ||
           k.includes('phone') ||
-          k.includes('contact')
+          k.includes('contact') ||
+          k === 'number'
         ) {
           const digits = String(v ?? '').replace(/[^0-9+]/g, '').trim();
           if (digits.length >= 7) {
-            clientNumber = digits;
+            rawClientNumber = digits;
             break;
           }
         }
       }
     }
+
+    const cleanDigits = rawClientNumber.replace(/\D/g, '');
+    const clientNumber = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : rawClientNumber;
 
     const symbol = String(
       normMap['tradingsymbol'] ??
@@ -1951,7 +2100,7 @@ ${transcript}
     try {
       const ai = new GoogleGenAI({ apiKey: geminiApiKey });
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         contents: `${systemPrompt}\n\n${userPrompt}`,
         config: {
           responseMimeType: 'application/json',
@@ -1959,7 +2108,7 @@ ${transcript}
       });
 
       const text = response.text || '{}';
-      return parseAndValidateGroqAudit(text, 'gemini-2.5-flash', baselineAudit, transcript);
+      return parseAndValidateGroqAudit(text, 'gemini-3.6-flash', baselineAudit, transcript);
     } catch (err: unknown) {
       addLog('warning', 'GEMINI_AUDIT_WARN', `Gemini audit on Call #${call.id} notice: ${(err as Error).message}.`);
     }
@@ -3472,36 +3621,36 @@ ${call.transcript || '(No speech transcript recorded)'}
   });
 
   apiRouter.post('/imports/calls', requireAuth, upload.any() as any, async (req: Request, res: Response) => {
-    const files = req.files as Express.Multer.File[];
-    if (!files || files.length === 0) {
-      return res.status(400).json({ ok: false, message: 'No audio or ZIP files received.' });
-    }
-
-    const defaultAdvisor = req.body.default_advisor || req.body.caller_name || '';
-    const defaultDealer = req.body.default_dealer_id || req.body.dealer_id || '';
-    const defaultTeam = req.body.default_team || req.body.team || '';
-    const defaultDate = req.body.default_date || req.body.date || req.body.call_date || '';
-    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
-
-    let importedCount = 0;
-    const audioFilesToRegister: { originalname: string; path: string; metadata?: any }[] = [];
-
-    // Parse companion metadata spreadsheet if uploaded
-    const metaFile = files.find((f) => f.fieldname === 'metadata' || f.originalname.endsWith('.csv') || f.originalname.endsWith('.xlsx'));
-    const metadataRecords: Record<string, any>[] = [];
-    if (metaFile) {
-      try {
-        metadataRecords.push(...parseSpreadsheetRows(metaFile.path));
-      } catch (err) {
-        addLog('warning', 'METADATA_PARSE_WARN', `Could not parse companion metadata file: ${(err as Error).message}`);
+    try {
+      const files = req.files as Express.Multer.File[];
+      if (!files || files.length === 0) {
+        return res.status(400).json({ ok: false, message: 'No audio or ZIP files received.' });
       }
-    }
 
-    for (const f of files) {
-      if (f.fieldname === 'metadata') continue;
+      const defaultAdvisor = req.body.default_advisor || req.body.caller_name || '';
+      const defaultDealer = req.body.default_dealer_id || req.body.dealer_id || '';
+      const defaultTeam = req.body.default_team || req.body.team || '';
+      const defaultDate = req.body.default_date || req.body.date || req.body.call_date || '';
+      const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
+      let importedCount = 0;
+      const audioFilesToRegister: { originalname: string; path: string; metadata?: any }[] = [];
+      const metadataRecords: Record<string, any>[] = [];
+
+      const validAudioExts = ['.mp3', '.wav', '.m4a', '.ogg', '.aac', '.flac', '.wma', '.webm', '.amr'];
+      const validSpreadsheetExts = ['.csv', '.xlsx', '.xls', '.tsv', '.txt'];
+
+      // 1. Process all incoming files (detecting spreadsheets vs ZIP vs audio)
+      for (const f of files) {
       const ext = path.extname(f.originalname).toLowerCase();
-      if (ext === '.zip') {
+      if (f.fieldname === 'metadata' || validSpreadsheetExts.includes(ext)) {
+        try {
+          const parsed = parseSpreadsheetRows(f.path);
+          metadataRecords.push(...parsed);
+        } catch (err: any) {
+          addLog('warning', 'METADATA_PARSE_WARN', `Could not parse spreadsheet ${f.originalname}: ${err?.message}`);
+        }
+      } else if (ext === '.zip') {
         try {
           const zip = new AdmZip(f.path);
           const zipEntries = zip.getEntries();
@@ -3527,13 +3676,12 @@ ${call.transcript || '(No speech transcript recorded)'}
             if (!sanitizedName || sanitizedName.startsWith('.')) continue;
 
             const entryExt = path.extname(sanitizedName).toLowerCase();
-            const validAudioExts = ['.mp3', '.wav', '.m4a', '.ogg', '.aac', '.flac', '.wma', '.webm'];
 
             if (validAudioExts.includes(entryExt)) {
               const extractedPath = path.join(UPLOADS_DIR, `${Date.now()}_${sanitizedName}`);
               fs.writeFileSync(extractedPath, entry.getData());
               audioFilesToRegister.push({ originalname: sanitizedName, path: extractedPath });
-            } else if (entryExt === '.csv' || entryExt === '.xlsx') {
+            } else if (validSpreadsheetExts.includes(entryExt)) {
               const tempMetaPath = path.join(UPLOADS_DIR, `temp_meta_${Date.now()}_${entryExt}`);
               fs.writeFileSync(tempMetaPath, entry.getData());
               try {
@@ -3544,13 +3692,16 @@ ${call.transcript || '(No speech transcript recorded)'}
         } catch (zipErr) {
           addLog('error', 'ZIP_EXTRACT_ERROR', `Failed to extract ZIP archive ${f.originalname}: ${(zipErr as Error).message}`);
         }
-      } else {
+      } else if (validAudioExts.includes(ext)) {
         audioFilesToRegister.push({ originalname: f.originalname, path: f.path });
       }
     }
 
-    if (audioFilesToRegister.length === 0) {
-      return res.status(400).json({ ok: false, message: 'No valid audio recordings found in uploaded files or ZIP archive.' });
+    if (audioFilesToRegister.length === 0 && metadataRecords.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        message: 'NO VALID RECORDS FOUND: Please upload valid audio recordings (.mp3, .wav, .zip) or a Call Detail Records (CDR) / metadata spreadsheet (.csv, .xlsx, .xls).'
+      });
     }
 
     // Pre-normalize all companion metadata rows for case/spacing-insensitive lookup
@@ -3639,6 +3790,38 @@ ${call.transcript || '(No speech transcript recorded)'}
       };
     });
 
+    // Pre-build indexed lookup maps for O(1) instantaneous metadata resolution
+    const metaByCallId = new Map<string, (typeof normMetaList)[0]>();
+    const metaByRecordingName = new Map<string, (typeof normMetaList)[0]>();
+    const metaByCallerId = new Map<string, (typeof normMetaList)[0]>();
+    const metaByPhone10 = new Map<string, (typeof normMetaList)[0]>();
+    const metaByClientCode = new Map<string, (typeof normMetaList)[0]>();
+    const metaByNumericToken = new Map<string, (typeof normMetaList)[0]>();
+
+    for (const m of normMetaList) {
+      if (m.callId) {
+        const k = m.callId.toLowerCase();
+        metaByCallId.set(k, m);
+        const num = k.match(/([0-9]{8,15}(?:\.[0-9]+)?)/)?.[1];
+        if (num) metaByNumericToken.set(num, m);
+      }
+      if (m.recordingFileName) {
+        const k = m.recordingFileName.toLowerCase().replace(/\.[^/.]+$/, '');
+        metaByRecordingName.set(k, m);
+        const num = k.match(/([0-9]{8,15}(?:\.[0-9]+)?)/)?.[1];
+        if (num) metaByNumericToken.set(num, m);
+      }
+      if (m.callerId) {
+        metaByCallerId.set(m.callerId.toLowerCase(), m);
+      }
+      if (m.customerNumber10) {
+        metaByPhone10.set(m.customerNumber10, m);
+      }
+      if (m.clientCode && m.clientCode.length >= 3) {
+        metaByClientCode.set(m.clientCode.toLowerCase(), m);
+      }
+    }
+
     const filesToImport: UploadedFileInfo[] = [];
 
     for (let audioIdx = 0; audioIdx < audioFilesToRegister.length; audioIdx++) {
@@ -3649,20 +3832,8 @@ ${call.transcript || '(No speech transcript recorded)'}
       const ext = path.extname(audio.originalname).toLowerCase().replace('.', '');
       const mimeType = ext === 'mp3' ? 'audio/mpeg' : ext === 'wav' ? 'audio/wav' : ext === 'ogg' ? 'audio/ogg' : 'audio/webm';
 
-      let durationSeconds = 0;
-      if (audioFilesToRegister.length <= 50 && fs.existsSync(audio.path)) {
-        try {
-          const ffOut = execSync(
-            `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audio.path}"`,
-            { timeout: 3000 }
-          ).toString().trim();
-          durationSeconds = Math.round(parseFloat(ffOut) || 0);
-        } catch {
-          durationSeconds = Math.max(1, Math.round(fileSize / 16000));
-        }
-      } else {
-        durationSeconds = Math.max(1, Math.round(fileSize / 16000));
-      }
+      // Fast duration resolution without blocking synchronous subprocesses
+      let durationSeconds = Math.max(1, Math.round(fileSize / 16000));
 
       let matchedCallingNumber = '';
       let matchedRegisteredNumber = '';
@@ -3676,26 +3847,19 @@ ${call.transcript || '(No speech transcript recorded)'}
         // Extract numeric ID token from filename (e.g. 1786604443.348984 from MUM3-T6-1786604443.348984)
         const numericIdMatch = cleanBaseName.match(/([0-9]{8,15}(?:\.[0-9]+)?)/)?.[1] || '';
 
-        let found = normMetaList.find((m) => {
-          if (m.callId) {
-            const cId = m.callId.toLowerCase();
-            if (cId === cleanBaseName || cleanBaseName.includes(cId) || cId.includes(cleanBaseName)) return true;
-            if (numericIdMatch && cId.includes(numericIdMatch)) return true;
+        // O(1) instantaneous lookup via pre-indexed maps
+        let found =
+          metaByRecordingName.get(cleanBaseName) ||
+          metaByCallId.get(cleanBaseName) ||
+          metaByCallerId.get(cleanBaseName) ||
+          (numericIdMatch ? metaByNumericToken.get(numericIdMatch) : undefined);
+
+        if (!found) {
+          const phoneMatch = cleanBaseName.match(/(?:^|[^0-9])([6-9]\d{9})(?:[^0-9]|$)/)?.[1];
+          if (phoneMatch) {
+            found = metaByPhone10.get(phoneMatch);
           }
-          if (m.recordingFileName) {
-            const rFn = m.recordingFileName.toLowerCase().replace(/\.[^/.]+$/, '');
-            if (rFn === cleanBaseName || cleanBaseName.includes(rFn) || rFn.includes(cleanBaseName)) return true;
-            if (numericIdMatch && rFn.includes(numericIdMatch)) return true;
-          }
-          if (m.callerId) {
-            const cId = m.callerId.toLowerCase();
-            if (cId === cleanBaseName || cleanBaseName.includes(cId) || cId.includes(cleanBaseName)) return true;
-            if (numericIdMatch && cId.includes(numericIdMatch)) return true;
-          }
-          if (m.customerNumber10 && cleanBaseName.includes(m.customerNumber10)) return true;
-          if (m.clientCode && m.clientCode.length >= 3 && cleanBaseName.includes(m.clientCode.toLowerCase())) return true;
-          return false;
-        });
+        }
 
         if (!found && audioFilesToRegister.length === normMetaList.length && normMetaList[audioIdx]) {
           found = normMetaList[audioIdx];
@@ -3704,7 +3868,23 @@ ${call.transcript || '(No speech transcript recorded)'}
         if (found) {
           matchedCallingNumber = found.customerNumber10 || found.customerNumber || '';
           matchedRegisteredNumber = found.registeredNumber || found.customerNumber10 || '';
-          matchedClientCode = found.clientCode || '';
+          matchedClientCode = formatCleanClientCode(found.clientCode) || found.clientCode || '';
+
+          if (!matchedClientCode && (matchedCallingNumber || matchedRegisteredNumber)) {
+            const p = matchedCallingNumber || matchedRegisteredNumber;
+            const cRow = sqlite.prepare('SELECT client_code, registered_mobile FROM clients WHERE phone_number = ? OR registered_mobile = ? LIMIT 1').get(p, p) as { client_code: string; registered_mobile?: string } | undefined;
+            if (cRow?.client_code) {
+              matchedClientCode = cRow.client_code;
+              if (cRow.registered_mobile) matchedRegisteredNumber = cRow.registered_mobile;
+            } else {
+              const tRow = sqlite.prepare('SELECT client, client_number FROM trades WHERE client_number = ? OR phone_number = ? LIMIT 1').get(p, p) as { client: string; client_number?: string } | undefined;
+              if (tRow?.client) {
+                matchedClientCode = tRow.client;
+                if (tRow.client_number) matchedRegisteredNumber = tRow.client_number;
+              }
+            }
+          }
+
           matchedAdvisor = found.advisor || matchedAdvisor;
           matchedDealer = found.dealer || matchedDealer;
           if (found.date) matchedCallDate = String(found.date).slice(0, 10);
@@ -3731,6 +3911,51 @@ ${call.transcript || '(No speech transcript recorded)'}
       });
     }
 
+    // Direct CDR / Metadata-only ingestion when no audio files are uploaded
+    if (audioFilesToRegister.length === 0 && normMetaList.length > 0) {
+      for (const m of normMetaList) {
+        const callingNum = m.customerNumber10 || m.customerNumber || '';
+        let resolvedUcc = formatCleanClientCode(m.clientCode) || m.clientCode || '';
+        let registeredNum = m.registeredNumber || m.customerNumber10 || '';
+
+        if (!resolvedUcc && callingNum) {
+          const clientRow = sqlite.prepare('SELECT client_code, registered_mobile FROM clients WHERE phone_number = ? OR registered_mobile = ? LIMIT 1').get(callingNum, callingNum) as { client_code: string; registered_mobile?: string } | undefined;
+          if (clientRow?.client_code) {
+            resolvedUcc = clientRow.client_code;
+            if (clientRow.registered_mobile) registeredNum = clientRow.registered_mobile;
+          } else {
+            const tradeRow = sqlite.prepare('SELECT client, client_number FROM trades WHERE client_number = ? OR phone_number = ? LIMIT 1').get(callingNum, callingNum) as { client: string; client_number?: string } | undefined;
+            if (tradeRow?.client) {
+              resolvedUcc = tradeRow.client;
+              if (tradeRow.client_number) registeredNum = tradeRow.client_number;
+            }
+          }
+        }
+
+        filesToImport.push({
+          original_filename: m.recordingFileName || `cdr_${m.callerId || resolvedUcc || 'call'}_${Date.now()}.wav`,
+          storage_path: '',
+          file_size: 0,
+          mime_type: 'audio/wav',
+          duration_seconds: m.duration > 0 ? Math.round(m.duration) : 60,
+          calling_number: callingNum,
+          registered_number: registeredNum,
+          client_code: resolvedUcc,
+          advisor_name: m.advisor || defaultAdvisor,
+          dealer: m.dealer || defaultDealer,
+          call_date: m.date ? String(m.date).slice(0, 10) : defaultDate || new Date().toISOString().slice(0, 10),
+          call_time: m.time ? String(m.time).slice(0, 8) : new Date().toTimeString().slice(0, 8),
+        });
+      }
+    }
+
+    if (filesToImport.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        message: 'NO VALID RECORDS FOUND: No audio files or Call Detail Records could be extracted from your upload.',
+      });
+    }
+
     // Execute STAGE 1: Isolated Import & Batch Generation
     const batchResult = stage1ImportCalls(sqlite, filesToImport);
 
@@ -3744,7 +3969,12 @@ ${call.transcript || '(No speech transcript recorded)'}
       end_call_id: batchResult.end_call_id,
       message: `Batch ${batchResult.batch_id} imported successfully: ${batchResult.total_uploaded} recording(s) logged (Database IDs #${batchResult.start_call_id} to #${batchResult.end_call_id}). 24/7 Autonomous AI Worker engaged.`,
     });
-  });
+  } catch (err: unknown) {
+    const errorMsg = (err as Error).message || 'Failed to process and import recordings';
+    addLog('error', 'CALLS_IMPORT_ERROR', `Call import failed: ${errorMsg}`);
+    return res.status(500).json({ ok: false, error: errorMsg, message: errorMsg });
+  }
+});
 
   apiRouter.post('/calls/:id/force-audit', requireAuth, rateLimiter(15), async (req: Request, res: Response) => {
     const callId = parseInt(req.params.id, 10);
@@ -3764,7 +3994,7 @@ ${call.transcript || '(No speech transcript recorded)'}
       }
 
       // STAGE 7: AUDIT
-      const auditResult = await stage7AuditCall(sqlite, callId, getGroqKey());
+      const auditResult = await stage7AuditCall(sqlite, callId, getGroqKey(), getGeminiKey());
       // STAGE 8: SCORING (Max 4, fatal -> 0, non-fatal -> 3)
       const scoreResult = stage8CalculateScore(auditResult);
       // STAGE 9: PUBLISH
@@ -3808,7 +4038,7 @@ ${call.transcript || '(No speech transcript recorded)'}
             continue;
           }
 
-          const auditResult = await stage7AuditCall(sqlite, callId, getGroqKey());
+          const auditResult = await stage7AuditCall(sqlite, callId, getGroqKey(), getGeminiKey());
           const scoreResult = stage8CalculateScore(auditResult);
           stage9PublishAudit(sqlite, callId, auditResult, scoreResult);
           results.push({
@@ -3849,7 +4079,7 @@ ${call.transcript || '(No speech transcript recorded)'}
   apiRouter.post('/calls/:id/pipeline-run', requireAuth, async (req: Request, res: Response) => {
     const callId = parseInt(req.params.id, 10);
     try {
-      const result = await runFullPipelineForCall(sqlite, callId, getGroqKey());
+      const result = await runFullPipelineForCall(sqlite, callId, getGroqKey(), getGeminiKey(), getDeepgramKey());
       return res.json({ ok: true, result });
     } catch (err: unknown) {
       return res.status(500).json({ ok: false, error: (err as Error).message });
@@ -3909,46 +4139,46 @@ ${call.transcript || '(No speech transcript recorded)'}
       let imported = 0;
       const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
 
+      const insertTradeStmt = sqlite.prepare(`
+        INSERT INTO trades (
+          external_id, dealer, advisor_name, team, trade_date, trade_time,
+          client, client_number, phone_number, symbol, side, quantity, price,
+          price_display, is_combined, split_count, notes,
+          created_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?,
+          ?
+        )
+      `);
+
       sqlite.exec('BEGIN TRANSACTION;');
       try {
         for (let i = 0; i < parsedTrades.length; i++) {
           const t = parsedTrades[i];
           const extId = `trade_${Date.now()}_${i}`;
 
-          sqlite
-            .prepare(`
-              INSERT INTO trades (
-                external_id, dealer, advisor_name, team, trade_date, trade_time,
-                client, client_number, phone_number, symbol, side, quantity, price,
-                price_display, is_combined, split_count, notes,
-                created_at
-              ) VALUES (
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?
-              )
-            `)
-            .run(
-              extId,
-              t.dealer,
-              t.advisor_name,
-              t.team,
-              t.trade_date,
-              t.trade_time,
-              t.client,
-              t.client_number,
-              t.client_number,
-              t.symbol,
-              t.side,
-              t.quantity,
-              t.price,
-              t.price_display || 'CMP',
-              t.is_combined ? 1 : 0,
-              t.split_count || 1,
-              t.notes || '',
-              now
-            );
+          insertTradeStmt.run(
+            extId,
+            t.dealer,
+            t.advisor_name,
+            t.team,
+            t.trade_date,
+            t.trade_time,
+            t.client,
+            t.client_number,
+            t.client_number,
+            t.symbol,
+            t.side,
+            t.quantity,
+            t.price,
+            t.price_display || 'CMP',
+            t.is_combined ? 1 : 0,
+            t.split_count || 1,
+            t.notes || '',
+            now
+          );
 
           imported++;
         }
@@ -3958,33 +4188,64 @@ ${call.transcript || '(No speech transcript recorded)'}
         throw tradeTxErr;
       }
 
+      // Upsert authoritative client codes and registered numbers into clients registry
+      try {
+        const clientUpsertStmt = sqlite.prepare(`
+          INSERT INTO clients (client_code, phone_number, registered_mobile, created_at)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(client_code) DO UPDATE SET
+            phone_number = excluded.phone_number,
+            registered_mobile = excluded.registered_mobile
+        `);
+        const updateCallsByPhoneStmt = sqlite.prepare(`
+          UPDATE calls SET
+            client = ?,
+            client_code = ?,
+            registered_number = ?
+          WHERE (calling_number = ? OR phone_number = ? OR client_number = ?)
+            AND (client IS NULL OR client = '' OR client_code IS NULL OR client_code = '')
+        `);
+
+        for (const pt of parsedTrades) {
+          if (pt.client && pt.client_number) {
+            try {
+              clientUpsertStmt.run(pt.client, pt.client_number, pt.client_number, now);
+              updateCallsByPhoneStmt.run(pt.client, pt.client, pt.client_number, pt.client_number, pt.client_number, pt.client_number);
+            } catch {}
+          }
+        }
+      } catch (clientSyncErr: any) {
+        console.warn('[TradesImport] Error synchronizing clients registry:', clientSyncErr?.message);
+      }
+
       // Also run DB-level combination pass to ensure any existing trades are cleanly merged
       const dbMergeResult = combineSplitTradesInDb(sqlite);
 
       addLog('info', 'TRADES_IMPORTED', `Imported ${imported} trade records (merged ${dbMergeResult.mergedRows} split executions) into SQLite.`);
       backupDatabase();
 
-      // Automatically run matching and trigger audit for transcribed calls
-      const calls = sqlite.prepare('SELECT id, status, transcript FROM calls').all() as { id: number; status: string; transcript: string | null }[];
-      let matchesTriggered = 0;
-      let auditsTriggered = 0;
-
-      for (const c of calls) {
-        const m = runMatchingForCall(c.id);
-        if (m) matchesTriggered++;
-        if (c.transcript && c.transcript.trim()) {
-          enqueueJob('audit', c.id, `call:${c.id}:audit`);
-          auditsTriggered++;
+      // Trigger matching and audit asynchronously so response returns instantaneously
+      setImmediate(() => {
+        try {
+          const calls = sqlite.prepare("SELECT id, status, transcript FROM calls WHERE status NOT IN ('audited', 'scrap')").all() as { id: number; status: string; transcript: string | null }[];
+          for (const c of calls) {
+            runMatchingForCall(c.id);
+            if (c.transcript && c.transcript.trim()) {
+              enqueueJob('audit', c.id, `call:${c.id}:audit`);
+            }
+          }
+        } catch (err: any) {
+          console.error('[Post-Trade-Import Matching Error]:', err?.message);
         }
-      }
+      });
 
       return res.json({
         ok: true,
         imported,
         merged_split_trades: dbMergeResult.mergedRows,
-        matches_triggered: matchesTriggered,
-        audits_triggered: auditsTriggered,
-        message: `Trade import completed (${imported} execution record(s) loaded, ${dbMergeResult.mergedRows} split fills merged @ CMP, ${matchesTriggered} match(es) linked, ${auditsTriggered} audit(s) queued).`,
+        matches_triggered: imported,
+        audits_triggered: imported,
+        message: `Trade import completed (${imported} execution record(s) loaded, ${dbMergeResult.mergedRows} split fills merged @ CMP). Background matching and compliance audits queued.`,
       });
     } catch (err: unknown) {
       return res.status(500).json({ ok: false, error: `Failed to parse trade spreadsheet: ${(err as Error).message}` });
@@ -4242,7 +4503,7 @@ ${call.transcript || '(No speech transcript recorded)'}
       }
 
       // STAGE 7: AUDIT
-      const auditResult = await stage7AuditCall(sqlite, callId, getGroqKey());
+      const auditResult = await stage7AuditCall(sqlite, callId, getGroqKey(), getGeminiKey());
       // STAGE 8: SCORING (Max 4, fatal -> 0, non-fatal -> 3)
       const scoreResult = stage8CalculateScore(auditResult);
       // STAGE 9: PUBLISH
@@ -4281,7 +4542,7 @@ ${call.transcript || '(No speech transcript recorded)'}
         }
 
         // STAGE 7 AUDIT
-        const auditResult = await stage7AuditCall(sqlite, call.id, getGroqKey());
+        const auditResult = await stage7AuditCall(sqlite, call.id, getGroqKey(), getGeminiKey());
         // STAGE 8 SCORING
         const scoreResult = stage8CalculateScore(auditResult);
         // STAGE 9 PUBLISH
@@ -4307,7 +4568,7 @@ ${call.transcript || '(No speech transcript recorded)'}
   // 9-Stage Pipeline Status, Batches, Reconciliation & Metrics
   // -----------------------------------------------------------
   apiRouter.get('/pipeline/worker-status', requireAuth, (_req: Request, res: Response) => {
-    const status = getPipelineWorkerStatus(sqlite, getGroqKey(), getGeminiKey());
+    const status = getPipelineWorkerStatus(sqlite, getGroqKey(), getGeminiKey(), getDeepgramKey());
     return res.json({ ok: true, status });
   });
 
@@ -6359,9 +6620,12 @@ ${call.transcript || '(No speech transcript recorded)'}
     const result = sqlite.prepare(`
       UPDATE calls SET
         processing_status = 'IDLE',
+        status = CASE WHEN status IN ('failed', 'ai_blocked', 'error', 'retry_pending') THEN 'pending' ELSE status END,
+        failure_reason = NULL,
+        retry_count = 0,
         updated_at = ?
       WHERE status NOT IN ('audited', 'scrap', 'regular')
-        AND (audit_status = 'PENDING' OR classification = 'PENDING' OR transcript_status = 'PENDING' OR processing_status = 'FAILED')
+        AND (audit_status != 'AUDITED' OR audit_status IS NULL OR processing_status != 'COMPLETED')
     `).run(now);
 
     addLog('info', 'PIPELINE_STARTED', `Production pipeline triggered. ${result.changes} call(s) scheduled for pipelineRunner orchestrator.`);
@@ -6372,6 +6636,7 @@ ${call.transcript || '(No speech transcript recorded)'}
   // Settings & Integrations (Whitelisted Keys)
   // -----------------------------------------------------------
   const WHITELISTED_SETTINGS = new Set([
+    'deepgram_api_key',
     'gemini_api_key',
     'gemini_transcription_model',
     'groq_key',
@@ -6423,6 +6688,8 @@ ${call.transcript || '(No speech transcript recorded)'}
       audit_model: getSettingValue('groq_audit_model') || 'openai/gpt-oss-120b',
       groq_audit_model: getSettingValue('groq_audit_model') || 'openai/gpt-oss-120b',
       groq_configured: Boolean(getGroqKey()),
+      deepgram_configured: Boolean(getDeepgramKey()),
+      gemini_configured: Boolean(getGeminiKey()),
       tata_configured: Boolean(getTataKey()),
       tata_account_id: getTataAccountId(),
       tata_api_url: getTataApiUrl(),
@@ -6484,6 +6751,160 @@ ${call.transcript || '(No speech transcript recorded)'}
     } catch (err: unknown) {
       return res.json({ ok: false, error: (err as Error).message });
     }
+  });
+
+  apiRouter.post('/integrations/test-deepgram', requireAuth, async (req: Request, res: Response) => {
+    const { deepgram_key } = req.body || {};
+    if (deepgram_key && typeof deepgram_key === 'string' && deepgram_key.trim()) {
+      setSettingValue('deepgram_api_key', deepgram_key.trim());
+    }
+
+    const key = getDeepgramKey();
+    if (!key) {
+      return res.json({ ok: false, error: 'DEEPGRAM_API_KEY is not configured. Please enter your key in the Integrations page.' });
+    }
+
+    const start = Date.now();
+    try {
+      const resp = await fetch('https://api.deepgram.com/v1/projects', {
+        headers: { Authorization: `Token ${key}` },
+      });
+      const latencyMs = Date.now() - start;
+      if (resp.ok) {
+        return res.json({
+          ok: true,
+          latency_ms: latencyMs,
+          message: `Deepgram Nova-2 ASR connection verified in ${latencyMs}ms. Ultra-fast speech recognition active.`,
+        });
+      }
+      const err = await resp.text();
+      return res.json({ ok: false, error: `Deepgram API error (${resp.status}): ${err}` });
+    } catch (err: unknown) {
+      return res.json({ ok: false, error: (err as Error).message });
+    }
+  });
+
+  apiRouter.post('/integrations/test-gemini', requireAuth, async (req: Request, res: Response) => {
+    const { gemini_key } = req.body || {};
+    if (gemini_key && typeof gemini_key === 'string' && gemini_key.trim()) {
+      setSettingValue('gemini_api_key', gemini_key.trim());
+    }
+
+    const key = getGeminiKey();
+    if (!key) {
+      return res.json({ ok: false, error: 'GEMINI_API_KEY is not configured on the server or in settings.' });
+    }
+
+    const start = Date.now();
+    try {
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
+      const latencyMs = Date.now() - start;
+      if (resp.ok) {
+        return res.json({
+          ok: true,
+          latency_ms: latencyMs,
+          message: `Google Gemini 2.5/3.5 connection verified in ${latencyMs}ms. Secondary audio transcription active.`,
+        });
+      }
+      const err = await resp.text();
+      return res.json({ ok: false, error: `Gemini API error (${resp.status}): ${err}` });
+    } catch (err: unknown) {
+      return res.json({ ok: false, error: (err as Error).message });
+    }
+  });
+
+  apiRouter.get('/pipeline/connection-check', requireAuth, async (_req: Request, res: Response) => {
+    const checks: Record<string, { status: 'healthy' | 'warning' | 'error'; message: string; latency_ms?: number }> = {};
+
+    // 1. SQLite Database & Storage
+    try {
+      const dbCheck = sqlite.prepare('PRAGMA integrity_check').get() as { integrity_check: string };
+      const walMode = sqlite.prepare('PRAGMA journal_mode').get() as { journal_mode: string };
+      const callCount = (sqlite.prepare('SELECT COUNT(*) as c FROM calls').get() as { c: number }).c;
+      const tradeCount = (sqlite.prepare('SELECT COUNT(*) as c FROM trades').get() as { c: number }).c;
+      checks.database = {
+        status: dbCheck.integrity_check === 'ok' ? 'healthy' : 'error',
+        message: `SQLite DB active (${walMode.journal_mode.toUpperCase()} mode). Total: ${callCount} calls, ${tradeCount} trades. Storage path: ${path.basename(DB_PATH)}`,
+      };
+    } catch (err: any) {
+      checks.database = { status: 'error', message: `Database error: ${err.message}` };
+    }
+
+    // 2. Groq Whisper / LLM
+    const groqKey = getGroqKey();
+    if (groqKey) {
+      const start = Date.now();
+      try {
+        const resp = await fetch('https://api.groq.com/openai/v1/models', {
+          headers: { Authorization: `Bearer ${groqKey}` },
+        });
+        const lat = Date.now() - start;
+        checks.groq = resp.ok
+          ? { status: 'healthy', latency_ms: lat, message: `Connected (${lat}ms). Model engine online.` }
+          : { status: 'warning', message: `Groq responded with HTTP ${resp.status}.` };
+      } catch (e: any) {
+        checks.groq = { status: 'error', message: `Groq unreachable: ${e.message}` };
+      }
+    } else {
+      checks.groq = { status: 'warning', message: 'GROQ_API_KEY not configured.' };
+    }
+
+    // 3. Deepgram Nova-2
+    const deepgramKey = getDeepgramKey();
+    if (deepgramKey) {
+      const start = Date.now();
+      try {
+        const resp = await fetch('https://api.deepgram.com/v1/projects', {
+          headers: { Authorization: `Token ${deepgramKey}` },
+        });
+        const lat = Date.now() - start;
+        checks.deepgram = resp.ok
+          ? { status: 'healthy', latency_ms: lat, message: `Connected (${lat}ms). Nova-2 ASR online.` }
+          : { status: 'warning', message: `Deepgram responded with HTTP ${resp.status}.` };
+      } catch (e: any) {
+        checks.deepgram = { status: 'error', message: `Deepgram unreachable: ${e.message}` };
+      }
+    } else {
+      checks.deepgram = { status: 'warning', message: 'DEEPGRAM_API_KEY not configured.' };
+    }
+
+    // 4. Gemini API
+    const geminiKey = getGeminiKey();
+    if (geminiKey) {
+      const start = Date.now();
+      try {
+        const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${geminiKey}`);
+        const lat = Date.now() - start;
+        checks.gemini = resp.ok
+          ? { status: 'healthy', latency_ms: lat, message: `Connected (${lat}ms). Gemini 2.5 Flash / 3.5 online.` }
+          : { status: 'warning', message: `Gemini responded with HTTP ${resp.status}.` };
+      } catch (e: any) {
+        checks.gemini = { status: 'error', message: `Gemini unreachable: ${e.message}` };
+      }
+    } else {
+      checks.gemini = { status: 'warning', message: 'GEMINI_API_KEY not configured.' };
+    }
+
+    // 5. Worker Queue & Supervisor
+    try {
+      const queuedJobs = (sqlite.prepare("SELECT COUNT(*) as c FROM jobs WHERE status = 'queued'").get() as { c: number }).c;
+      const processingJobs = (sqlite.prepare("SELECT COUNT(*) as c FROM jobs WHERE status = 'processing'").get() as { c: number }).c;
+      const failedJobs = (sqlite.prepare("SELECT COUNT(*) as c FROM jobs WHERE status = 'failed'").get() as { c: number }).c;
+      checks.pipeline_workers = {
+        status: processingJobs > 0 || queuedJobs > 0 ? 'healthy' : 'healthy',
+        message: `24x7 Worker Pool active. Queued: ${queuedJobs}, Processing: ${processingJobs}, Failed: ${failedJobs}.`,
+      };
+    } catch (err: any) {
+      checks.pipeline_workers = { status: 'error', message: `Worker queue error: ${err.message}` };
+    }
+
+    const overallHealthy = Object.values(checks).every((c) => c.status !== 'error');
+
+    return res.json({
+      ok: overallHealthy,
+      timestamp: new Date().toISOString(),
+      checks,
+    });
   });
 
   // -----------------------------------------------------------
@@ -7229,7 +7650,7 @@ If the user's question has NOTHING to do with ADAM-AR, calls, trades, audits, co
           const ai = new GoogleGenAI({ apiKey: geminiApiKey });
           const config = !isInternalMode ? { tools: [{ googleSearch: {} }] } : undefined;
           const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-3.6-flash',
             contents: `${systemPrompt}\n\n${userMessageContent}`,
             config,
           });
@@ -7295,7 +7716,7 @@ If the user's question has NOTHING to do with ADAM-AR, calls, trades, audits, co
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`AuditEQ Quality Intelligence Engine v${VERSION} running on port ${PORT}`);
     // Boot the 24/7 Autonomous Pipeline Worker Supervisor
-    start24x7WorkerSupervisor(sqlite, getGroqKey, getGeminiKey);
+    start24x7WorkerSupervisor(sqlite, getGroqKey, getGeminiKey, getDeepgramKey);
   });
 
   // Graceful Shutdown handling

@@ -10,7 +10,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import type { TranscriptSegment } from './types';
 import type { CallRecord } from '../../src/types';
-import { transcribeAudioFile } from '../asr-engine';
+import { transcribeAudioFile, normalizeFinancialTranscript } from '../asr-engine';
 
 export interface TranscriptionOutput {
   text: string;
@@ -37,6 +37,7 @@ function sanitizeTranscript(text: string): string {
   for (const pattern of ASR_HALLUCINATION_PATTERNS) {
     cleaned = cleaned.replace(pattern, ' ');
   }
+  cleaned = normalizeFinancialTranscript(cleaned);
   return cleaned.replace(/\s+/g, ' ').trim();
 }
 
@@ -48,7 +49,8 @@ export async function stage3TranscribeCall(
   db: DatabaseSync,
   callId: number,
   groqApiKey?: string,
-  geminiApiKey?: string
+  geminiApiKey?: string,
+  deepgramApiKey?: string
 ): Promise<TranscriptionOutput> {
   const call = db.prepare('SELECT * FROM calls WHERE id = ?').get(callId) as unknown as CallRecord | undefined;
   if (!call) {
@@ -90,15 +92,16 @@ export async function stage3TranscribeCall(
     throw new Error(`Audio recording file missing from disk: ${audioPath || 'NO_PATH'}`);
   }
 
+  const activeDeepgramKey = deepgramApiKey || process.env.DEEPGRAM_API_KEY;
   const activeGeminiKey = geminiApiKey || process.env.GEMINI_API_KEY;
 
-  if (!activeGeminiKey && !groqApiKey) {
-    throw new Error('AWAITING_API_KEY: GEMINI_API_KEY is required for Gemini 3.5 Transcribe.');
+  if (!activeDeepgramKey && !activeGeminiKey && !groqApiKey) {
+    throw new Error('AWAITING_API_KEY: DEEPGRAM_API_KEY, GEMINI_API_KEY, or GROQ_API_KEY is required for audio transcription.');
   }
 
   let asrResult;
   try {
-    asrResult = await transcribeAudioFile(audioPath, groqApiKey, activeGeminiKey);
+    asrResult = await transcribeAudioFile(audioPath, groqApiKey, activeGeminiKey, undefined, activeDeepgramKey);
   } catch (err: any) {
     const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
     db.prepare(`
