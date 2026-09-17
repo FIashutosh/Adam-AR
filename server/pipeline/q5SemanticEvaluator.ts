@@ -22,6 +22,8 @@ const PROHIBITED_ENGLISH = [
   /\b(?:100%\s+(?:safe|guarantee|risk\s*free)|zero\s+risk|risk\s*free\s+return|no\s+loss\s+guaranteed)\b/i,
   /\b(?:you\s+will\s+definitely\s+make|sure\s*shot\s+profit|will\s+double\s+your\s+money|surely\s+double)\b/i,
   /\b(?:cannot\s+lose\s+money|impossible\s+to\s+lose|guaranteed\s+multibagger)\b/i,
+  /\b(?:insider\s+(?:tip|info|news)|sure\s*shot\s*tip|guaranteed\s*tip|jackpot\s*(?:call|share|tip))\b/i,
+  /\b(?:operator\s+(?:game|play|stock)|upper\s*circuit\s*guaranteed|circuit\s*lagne\s*wala)\b/i,
 ];
 
 // Hindi / Hinglish prohibited assurance patterns
@@ -30,6 +32,7 @@ const PROHIBITED_HINDI_HINGLISH = [
   /\b(?:loss\s+bilkul\s+nahi|koi\s+risk\s+nahi|bilkul\s+safe\s+hai|loss\s+ka\s+koi\s+chance\s+nahi)\b/i,
   /\b(?:meri\s+(?:guarantee|pakkii\s+guarantee)|100%\s+guarantee\s+hai|fix\s+return\s+milega)\b/i,
   /\b(?:profit\s+hi\s+profit|paisa\s+dubne\s+ka\s+sawal\s+nahi|mera\s+vaada\s+hai)\b/i,
+  /\b(?:andar\s+ki\s+khabar|sure\s+call|dhamaka\s+call|pakki\s+khabar)\b/i,
 ];
 
 // Legitimate regulatory disclaimers & negations that negate promissory intent
@@ -57,17 +60,20 @@ async function callLlmForQ5(
   geminiKey?: string
 ): Promise<LlmQ5Response | null> {
   const prompt = `You are a strict SEBI (Securities and Exchange Board of India) Regulatory Compliance Auditor.
-Analyze this broker-client phone conversation for Question 5: Non-Promissory Return Analysis.
+Analyze this broker-client phone conversation for Question 5: No Assured Returns / Free Tips / Market Manipulation.
 
 REGULATORY RULE:
-SEBI strictly prohibits equity dealers, relationship managers, and advisors from making any verbal guarantee, return promise, profit assurance, or capital protection claim to clients.
+SEBI strictly prohibits equity dealers, relationship managers, and advisors from:
+1. Making any verbal guaranteed return or promised yield.
+2. Giving commitments of profit, assured gains, or capital protection.
+3. Offering unsolicited tips, insider information claims, or market manipulation (jackpot calls, operator schemes).
 
 STRICT AUDIT CRITERIA:
 1. ONLY statements spoken by the ADVISOR/DEALER can trigger a violation.
 2. If the CLIENT asks about returns, guarantees, or safety, this is NOT an advisor violation.
-3. If the ADVISOR gives market disclaimers ("subject to market risk", "we cannot guarantee returns", "markets fluctuate"), this is FULLY COMPLIANT.
-4. Factual discussions (e.g., historical returns, target price with rationale, company fundamentals) are FULLY COMPLIANT.
-5. PROHIBITED EXAMPLES: "100% guarantee", "you will definitely make 20%", "pakka double ho jayega", "koi risk nahi hai", "capital safe rahega".
+3. If the ADVISOR gives standard market disclaimers ("subject to market risk", "we cannot guarantee returns", "markets fluctuate"), this is FULLY COMPLIANT.
+4. Factual discussions (historical returns, research targets with fundamental rationale) are FULLY COMPLIANT.
+5. PROHIBITED VIOLATIONS: "100% guarantee", "you will definitely make 20%", "pakka double ho jayega", "koi risk nahi hai", "capital safe rahega", "insider tip", "jackpot call".
 
 TRANSCRIPT:
 """

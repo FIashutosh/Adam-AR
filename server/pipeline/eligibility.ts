@@ -48,28 +48,9 @@ export function isAuditEligible(
   }
 
   // Gate 1: Classification check (Spoken Order Intent)
+  // Strict Rule: Trade data does NOT automatically make a call PRE_ORDER.
+  // A call is PRE_ORDER only when the transcript contains actionable order details corresponding to a trade.
   let classification = (call.classification || call.call_type || '').toUpperCase();
-  if (classification !== 'PRE_ORDER') {
-    if (call.trade_match_status === 'CONFIRMED' || (call.matched_trade_id && call.matched_trade_id > 0)) {
-      classification = 'PRE_ORDER';
-      try {
-        db.prepare("UPDATE calls SET classification = 'PRE_ORDER', call_type = 'pre_order' WHERE id = ?").run(call.id);
-      } catch {}
-    } else {
-      // Check if phone matches trade within market hours (09:00 - 15:40)
-      const phone = (call as any).customer_number || call.calling_number || call.phone_number || '';
-      const digits = phone.replace(/\D/g, '').slice(-10);
-      if (digits && digits.length === 10) {
-        try {
-          const matchingTrade = db.prepare('SELECT id, client, client_code FROM trades WHERE client_number = ? OR phone_number = ? LIMIT 1').get(digits, digits) as any;
-          if (matchingTrade) {
-            classification = 'PRE_ORDER';
-            db.prepare("UPDATE calls SET classification = 'PRE_ORDER', call_type = 'pre_order', matched_trade_id = ?, client_code = COALESCE(NULLIF(client_code, ''), ?) WHERE id = ?").run(matchingTrade.id, matchingTrade.client || matchingTrade.client_code, call.id);
-          }
-        } catch {}
-      }
-    }
-  }
 
   if (classification !== 'PRE_ORDER') {
     return {

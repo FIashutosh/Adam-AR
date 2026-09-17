@@ -92,6 +92,8 @@ export const SYMBOL_ALIASES: Record<string, string[]> = {
   VEDL: ['vedanta', 'vedl'],
   TECHM: ['tech mahindra', 'techm'],
   BEL: ['bel', 'bharat electronics'],
+  HEXT: ['hext', 'hext-eq', 'hexaware', 'hexaware tech', 'hexaware technologies', 'hexaware technology'],
+  HEXAWARE: ['hext', 'hext-eq', 'hexaware', 'hexaware tech', 'hexaware technologies', 'hexaware technology'],
   HAL: ['hal', 'hindustan aeronautics'],
   BHEL: ['bhel', 'bharat heavy electricals'],
   IRCTC: ['irctc'],
@@ -518,9 +520,9 @@ export function formatCleanClientCode(clientCode?: string | null): string {
   // 4. Strip punctuation, whitespace, dashes, dots, underscores
   const squashed = str.replace(/[\s\-._:;,/]/g, '').toUpperCase();
 
-  // 5. Canonical prefix matching with phonetic tolerance (e.g. VIA -> WIA, VIF -> WIF)
+  // 5. Canonical prefix matching with phonetic tolerance (e.g. VIA -> WIA, VIF -> WIF, WIU/WIS -> WIA)
   const prefixMap: Array<{ pattern: RegExp; canonical: ValidClientPrefix }> = [
-    { pattern: /^(?:WIA|VIA|W1A|V1A)/, canonical: 'WIA' },
+    { pattern: /^(?:WIA|VIA|W1A|V1A|WIU|WIS)/, canonical: 'WIA' },
     { pattern: /^(?:WIF|VIF|W1F|V1F)/, canonical: 'WIF' },
     { pattern: /^(?:WIC|VIC|W1C|V1C)/, canonical: 'WIC' },
     { pattern: /^(?:WID|VID|W1D|V1D)/, canonical: 'WID' },
@@ -595,6 +597,109 @@ export function cleanCallerName(name: string | null | undefined): string {
 }
 
 /**
+ * Canonicalizes advisor name by stripping phone numbers, extensions, dots,
+ * and normalizing spacing/case.
+ * Examples:
+ * "Siva S (+9600551629)" -> "Siva S"
+ * "Siva.S" -> "Siva S"
+ * "S RAJESHKANNA" -> "Rajeshkanna" (tokens: ['s', 'rajeshkanna'])
+ * "Emam Shahid" -> "Emam Shahid"
+ */
+export function canonicalizeAdvisorName(name: string | null | undefined): string {
+  if (!name) return '';
+  let str = String(name).trim();
+  // Strip phone numbers in parentheses or brackets, e.g. (+9600551629) or (8106365245)
+  str = str.replace(/\s*[\(\[]\s*\+?[\d\s-]{7,15}\s*[\)\]]\s*$/i, '');
+  str = str.replace(/\s*[\(\[]\s*ext\s*\d+\s*[\)\]]\s*$/i, '');
+  // Replace dots, underscores, hyphens with spaces: "Siva.S" -> "Siva S"
+  str = str.replace(/[._\-]/g, ' ');
+  // Collapse whitespace
+  str = str.replace(/\s+/g, ' ').trim();
+  return str;
+}
+
+/**
+ * Compares two advisor names with token permutation & initial-tolerance matching.
+ * Examples:
+ * - "Siva S (+9600551629)" <-> "Siva.S" -> TRUE
+ * - "S Rajkumar" <-> "Rajkumar S" -> TRUE
+ * - "M Shankar" <-> "Shankar" -> TRUE
+ * - "S RAJESHKANNA" <-> "Rajeshkanna" -> TRUE
+ * - "Emam Shahid" <-> "EMAM SHAHID" -> TRUE
+ */
+export function compareAdvisorNames(
+  advisorA?: string | null,
+  advisorB?: string | null
+): { matched: boolean; score: number } {
+  if (!advisorA || !advisorB) return { matched: false, score: 0 };
+  const cleanA = canonicalizeAdvisorName(advisorA).toLowerCase();
+  const cleanB = canonicalizeAdvisorName(advisorB).toLowerCase();
+  if (!cleanA || !cleanB) return { matched: false, score: 0 };
+
+  if (cleanA === cleanB) return { matched: true, score: 1.0 };
+
+  const tokensA = cleanA.split(/\s+/).filter(Boolean);
+  const tokensB = cleanB.split(/\s+/).filter(Boolean);
+
+  // Exact set match (handles token order: "S Rajkumar" vs "Rajkumar S")
+  const setA = new Set(tokensA);
+  const setB = new Set(tokensB);
+  if (setA.size === setB.size && [...setA].every((t) => setB.has(t))) {
+    return { matched: true, score: 0.98 };
+  }
+
+  // Initial-tolerance matching:
+  // e.g., ["m", "shankar"] vs ["shankar"]
+  // e.g., ["s", "rajeshkanna"] vs ["rajeshkanna"]
+  const nonInitialsA = tokensA.filter((t) => t.length > 1);
+  const nonInitialsB = tokensB.filter((t) => t.length > 1);
+
+  if (nonInitialsA.length > 0 && nonInitialsB.length > 0) {
+    const setNonA = new Set(nonInitialsA);
+    const setNonB = new Set(nonInitialsB);
+    const allNonMatched =
+      (setNonA.size <= setNonB.size && [...setNonA].every((t) => setNonB.has(t))) ||
+      (setNonB.size <= setNonA.size && [...setNonB].every((t) => setNonA.has(t)));
+    if (allNonMatched) {
+      return { matched: true, score: 0.92 };
+    }
+  }
+
+  // Fuzzy similarity fallback
+  const sim = fuzzySimilarity(cleanA, cleanB);
+  if (sim >= 0.85) {
+    return { matched: true, score: sim };
+  }
+
+  return { matched: false, score: sim };
+}
+
+/**
+ * Verifies if a call timestamp falls within Indian equity market hours:
+ * 09:15:00 AM to 03:40:00 PM IST (09:15 to 15:40)
+ */
+export function isWithinMarketHours(timeStr?: string | null): boolean {
+  if (!timeStr) return true;
+  const str = String(timeStr).trim();
+  // Extract HH:MM:SS or HH:MM
+  const m = str.match(/(?:^|\s|T)(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?/i);
+  if (!m) return true;
+  let hours = parseInt(m[1], 10);
+  const minutes = parseInt(m[2], 10);
+  const seconds = m[3] ? parseInt(m[3], 10) : 0;
+  const ampm = m[4]?.toLowerCase();
+
+  if (ampm === 'pm' && hours < 12) hours += 12;
+  if (ampm === 'am' && hours === 12) hours = 0;
+
+  const totalSeconds = hours * 3600 + minutes * 60 + seconds;
+  const startMarket = 9 * 3600 + 15 * 60; // 09:15 AM = 33300s
+  const endMarket = 15 * 3600 + 40 * 60;  // 03:40 PM = 56400s
+
+  return totalSeconds >= startMarket && totalSeconds <= endMarket;
+}
+
+/**
  * Checks if a client code is present in a transcript using speech-tolerant matching.
  */
 export function matchClientCodeInTranscript(
@@ -648,6 +753,8 @@ export function matchClientCodeInTranscript(
       prefixVariants.push('(?:W\\s*I\\s*A|WIA|WI\\s*A|W\\s*IA)');
       prefixVariants.push('(?:V\\s*I\\s*A|VIA|VI\\s*A|V\\s*IA)');
       prefixVariants.push('(?:W1A|V1A)');
+      prefixVariants.push('(?:W\\s*I\\s*U|WIU|WI\\s*U)');
+      prefixVariants.push('(?:W\\s*I\\s*S|WIS|WI\\s*S)');
       prefixVariants.push('(?:double\\s*[-_]?\\s*u|double\\s*[-_]?\\s*you|dhablu|dablu)[\\s\\-_.]*I[\\s\\-_.]*A');
       prefixVariants.push('(?:w\\s*u\\s*i\\s*a)');
     } else if (rawPrefix === 'WIF') {

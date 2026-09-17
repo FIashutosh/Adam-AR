@@ -1443,6 +1443,11 @@ function parseSpreadsheetRows(filePath: string): Record<string, any>[] {
             continue;
           }
           const obj: Record<string, any> = {};
+          if (rowVals[2] !== undefined) obj['_col_c'] = rowVals[2];
+          if (rowVals[4] !== undefined) obj['_col_e'] = rowVals[4];
+          if (rowVals[9] !== undefined) obj['_col_j'] = rowVals[9];
+          if (rowVals[16] !== undefined) obj['_col_q'] = rowVals[16];
+          if (rowVals[23] !== undefined) obj['_col_x'] = rowVals[23];
           for (let j = 0; j < headers.length; j++) {
             const h = headers[j];
             if (h) {
@@ -1497,6 +1502,11 @@ function parseSpreadsheetRows(filePath: string): Record<string, any>[] {
           continue;
         }
         const obj: Record<string, any> = {};
+        if (row[2] !== undefined) obj['_col_c'] = row[2];
+        if (row[4] !== undefined) obj['_col_e'] = row[4];
+        if (row[9] !== undefined) obj['_col_j'] = row[9];
+        if (row[16] !== undefined) obj['_col_q'] = row[16];
+        if (row[23] !== undefined) obj['_col_x'] = row[23];
         for (let j = 0; j < headers.length; j++) {
           if (headers[j]) {
             obj[headers[j]] = row[j] ?? '';
@@ -3710,17 +3720,19 @@ ${call.transcript || '(No speech transcript recorded)'}
       for (const [k, v] of Object.entries(m)) {
         norm[normalizeKey(k)] = v;
       }
-      const callerId = String(
-        norm['callerid'] ?? norm['caller'] ?? norm['agentid'] ?? norm['smartfloid'] ?? norm['callid'] ?? norm['recordingid'] ?? norm['filename'] ?? norm['recordingname'] ?? norm['id'] ?? ''
-      ).trim();
+      // Direct Tata Telephony CDR mappings (User Mandate):
+      // Column C: Call ID (e.g. 1786592753.1553119 connects recording to metadata)
+      // Column E: Customer Number (e.g. 919840489999)
+      // Column J: Answered By Agent (e.g. Siva S)
+      // Column Q: Call Start Time (e.g. 09:15:53)
+      // Column X: Recording File Name (Tata recording identifier)
       const callId = String(
-        norm['callid'] ?? norm['smartfloid'] ?? norm['recordingid'] ?? norm['id'] ?? ''
-      ).trim();
-      const recordingFileName = String(
-        norm['recordingfilename'] ?? norm['recordingname'] ?? norm['recording'] ?? norm['filename'] ?? ''
+        m['_col_c'] ?? norm['colc'] ?? norm['callid'] ?? norm['smartfloid'] ?? norm['recordingid'] ?? norm['id'] ?? ''
       ).trim();
       const rawCustomerNumber = String(
-        norm['customernumber'] ??
+        m['_col_e'] ??
+          norm['cole'] ??
+          norm['customernumber'] ??
           norm['callednumber'] ??
           norm['callednum'] ??
           norm['dialnumber'] ??
@@ -3757,9 +3769,11 @@ ${call.transcript || '(No speech transcript recorded)'}
       const clientCode = String(
         norm['clientcode'] ?? norm['client'] ?? norm['ucc'] ?? norm['partycode'] ?? norm['account'] ?? norm['clientid'] ?? ''
       ).trim();
-      const advisor = String(
-        norm['answeredbyagent'] ?? norm['advisor'] ?? norm['caller'] ?? norm['advisorname'] ?? norm['agent'] ?? norm['username'] ?? ''
-      ).trim();
+      const advisor = cleanCallerName(
+        String(
+          m['_col_j'] ?? norm['colj'] ?? norm['answeredbyagent'] ?? norm['advisor'] ?? norm['caller'] ?? norm['advisorname'] ?? norm['agent'] ?? norm['username'] ?? ''
+        ).trim()
+      );
       const dealer = String(
         norm['dealer'] ?? norm['dealerid'] ?? norm['terminal'] ?? norm['terminalid'] ?? ''
       ).trim();
@@ -3767,8 +3781,14 @@ ${call.transcript || '(No speech transcript recorded)'}
         norm['team'] ?? norm['teamname'] ?? norm['group'] ?? norm['department'] ?? norm['branch'] ?? ''
       ).trim();
       const date = String(norm['date'] ?? norm['calldate'] ?? norm['tradedate'] ?? norm['startdate'] ?? norm['callstarttime'] ?? '').trim();
-      const time = String(norm['time'] ?? norm['calltime'] ?? norm['tradetime'] ?? norm['starttime'] ?? '').trim();
+      const time = String(
+        m['_col_q'] ?? norm['colq'] ?? norm['callstarttime'] ?? norm['time'] ?? norm['calltime'] ?? norm['tradetime'] ?? norm['starttime'] ?? ''
+      ).trim();
+      const recordingFileName = String(
+        m['_col_x'] ?? norm['colx'] ?? norm['recordingfilename'] ?? norm['recordingname'] ?? norm['recording'] ?? norm['filename'] ?? ''
+      ).trim();
       const duration = parseFloat(String(norm['conversationduration'] ?? norm['callduration'] ?? norm['duration'] ?? '0')) || 0;
+      const callerId = callId || String(norm['callerid'] ?? norm['caller'] ?? norm['agentid'] ?? '').trim();
 
       return {
         raw: m,
@@ -3847,12 +3867,14 @@ ${call.transcript || '(No speech transcript recorded)'}
         // Extract numeric ID token from filename (e.g. 1786604443.348984 from MUM3-T6-1786604443.348984)
         const numericIdMatch = cleanBaseName.match(/([0-9]{8,15}(?:\.[0-9]+)?)/)?.[1] || '';
 
-        // O(1) instantaneous lookup via pre-indexed maps
+        // O(1) instantaneous lookup via pre-indexed maps:
+        // Priority: Call File Name -> Column C = Call ID -> same Call ID in Metadata
         let found =
-          metaByRecordingName.get(cleanBaseName) ||
           metaByCallId.get(cleanBaseName) ||
-          metaByCallerId.get(cleanBaseName) ||
-          (numericIdMatch ? metaByNumericToken.get(numericIdMatch) : undefined);
+          (numericIdMatch ? metaByCallId.get(numericIdMatch) : undefined) ||
+          metaByRecordingName.get(cleanBaseName) ||
+          (numericIdMatch ? metaByNumericToken.get(numericIdMatch) : undefined) ||
+          metaByCallerId.get(cleanBaseName);
 
         if (!found) {
           const phoneMatch = cleanBaseName.match(/(?:^|[^0-9])([6-9]\d{9})(?:[^0-9]|$)/)?.[1];

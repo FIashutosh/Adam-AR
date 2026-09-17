@@ -101,7 +101,13 @@ export async function stage7AuditCall(
   const advisorSegments = segments.filter((s) => s.speaker === 'ADVISOR');
 
   // -----------------------------------------------------------
-  // Q1: Deterministic Phone Verification (Calling CLI vs Registered)
+  // Q1: Deterministic Check (Metadata Customer Number == Trade Data Number)
+  // User Mandate:
+  // "Q1: Customer Number in metadata == Trade Data Number
+  // This is a deterministic check.
+  // If metadata customer number == trade number: PASS
+  // Else: FAIL
+  // No AI needed here. Pure database / data match."
   // -----------------------------------------------------------
   let rawCalling = (call as any).customer_number || call.calling_number || call.phone_number || (call as any).caller_id || (call as any).cli || '';
   if (!rawCalling || rawCalling.includes('-')) {
@@ -112,58 +118,56 @@ export async function stage7AuditCall(
     }
   }
 
-  const normCalling10 = normalizePhoneNumber(rawCalling);
+  const normMetadataCustomer = normalizePhoneNumber(rawCalling);
 
   // Look up trade by normalized 10-digit number if trade not already linked
   let activeTrade = trade;
-  if (!activeTrade && normCalling10) {
+  if (!activeTrade && normMetadataCustomer) {
     try {
       activeTrade = db.prepare(`
         SELECT * FROM trades 
         WHERE client_number = ? OR phone_number = ? 
         ORDER BY id ASC LIMIT 1
-      `).get(normCalling10, normCalling10) as unknown as TradeRecord | undefined;
+      `).get(normMetadataCustomer, normMetadataCustomer) as unknown as TradeRecord | undefined;
     } catch {}
   }
 
-  let rawRegistered = call.registered_number || (activeTrade ? ((activeTrade as any).customer_number || activeTrade.client_number || activeTrade.phone_number || (activeTrade as any).mobile) : '') || call.client_number || '';
-  if (!rawRegistered && normCalling10) {
-    rawRegistered = normCalling10;
-  }
-
-  const normCalling = normalizePhoneNumber(rawCalling);
-  const normRegistered = normalizePhoneNumber(rawRegistered);
+  const rawTradeNumber = activeTrade ? ((activeTrade as any).number || activeTrade.client_number || activeTrade.phone_number || (activeTrade as any).mobile) : '';
+  const normTradeNumber = normalizePhoneNumber(rawTradeNumber);
 
   let q1Result: AuditQuestionResult;
-  if (normCalling && normRegistered && normCalling === normRegistered) {
+  if (normMetadataCustomer && normTradeNumber && normMetadataCustomer === normTradeNumber) {
     q1Result = {
       status: 'PASS',
-      evidence: `Calling Number (${normCalling}) matched Registered / Authorised Number (${normRegistered}). Customer placed order from verified registered contact number.`,
+      evidence: `Metadata Customer Number (${normMetadataCustomer}) matches Trade Data Number (${normTradeNumber}). Customer placed order from verified registered contact number.`,
       reason: 'Customer placed order from verified registered contact number.',
       speaker: 'CLIENT',
       confidence: 1.0,
       evidence_verified: true,
     };
   } else {
-    const q1Eval = evaluateDeterministicQ1(rawCalling, rawRegistered, transcript);
     q1Result = {
-      status: q1Eval.status,
-      evidence: q1Eval.evidence,
-      reason: q1Eval.reason,
-      speaker: q1Eval.speaker === 'CLIENT' ? 'CLIENT' : 'ADVISOR',
-      confidence: q1Eval.confidence,
+      status: 'FAIL',
+      flag: 'FATAL',
+      evidence: `Customer Number Mismatch: Metadata Customer Number (${normMetadataCustomer || 'None'}) does not match Trade Data Number (${normTradeNumber || 'None'}).`,
+      reason: 'Fatal SEBI non-compliance: Mismatch between metadata customer phone and trade data number.',
+      speaker: 'CLIENT',
+      confidence: 1.0,
       evidence_verified: true,
-      flag: q1Eval.status === 'FAIL' ? 'FATAL' : undefined,
     };
   }
 
   // -----------------------------------------------------------
-  // Q2: Pre-Order Client Code / UCC Confirmation (Speech & ASR Tolerant)
+  // Q2: Client Code resolution
+  // UCC spoken in call or resolved via master -> compare with Trade client code.
+  // PASS / FAIL.
   // -----------------------------------------------------------
-  let expectedUcc = formatCleanClientCode(call.client_code || call.client || (activeTrade ? (activeTrade.client || (activeTrade as any).client_code) : ''));
-  if (!expectedUcc && normCalling10) {
+  const tradeClientCode = formatCleanClientCode(activeTrade?.client || (activeTrade as any)?.client_code || '');
+  const metadataClientCode = formatCleanClientCode(call.client_code || call.client || '');
+  let expectedUcc = tradeClientCode || metadataClientCode;
+  if (!expectedUcc && normMetadataCustomer) {
     try {
-      const clientLookup = db.prepare('SELECT client, client_code FROM trades WHERE client_number = ? OR phone_number = ? LIMIT 1').get(normCalling10, normCalling10) as any;
+      const clientLookup = db.prepare('SELECT client, client_code FROM trades WHERE client_number = ? OR phone_number = ? LIMIT 1').get(normMetadataCustomer, normMetadataCustomer) as any;
       if (clientLookup?.client || clientLookup?.client_code) {
         expectedUcc = formatCleanClientCode(clientLookup.client || clientLookup.client_code);
       }
@@ -206,10 +210,10 @@ export async function stage7AuditCall(
       numSpacedRegex.test(transcript)
     );
 
-    // 4. Spoken client code / identity context
-    const hasClientContext = /\b(?:client|ucc|code|account|id)\b/i.test(transcript);
+    // 4. Master / Metadata matching trade client code
+    const masterMatched = (metadataClientCode && tradeClientCode && metadataClientCode === tradeClientCode);
 
-    if (clientCodeMatch.matched || hasSpokenDigits || (hasClientContext && activeTrade)) {
+    if (clientCodeMatch.matched || hasSpokenDigits || masterMatched) {
       const matchedSeg = advisorSegments.find((s) => matchClientCodeInTranscript(expectedUcc, s.text).matched) ||
         segments.find((s) => matchClientCodeInTranscript(expectedUcc, s.text).matched);
 
@@ -223,8 +227,8 @@ export async function stage7AuditCall(
 
       q2Result = {
         status: 'PASS',
-        evidence: `Client UCC ${expectedUcc} confirmed in conversation${segTime}: "${segText.trim()}"`,
-        reason: `Authoritative client UCC ${expectedUcc} confirmed in dialogue.`,
+        evidence: `Client UCC ${expectedUcc} confirmed in conversation${segTime}: "${segText.trim()}". Matches trade client code.`,
+        reason: `Authoritative client UCC ${expectedUcc} confirmed in dialogue / trade data.`,
         confidence: 0.95,
         speaker: segSpeaker,
         start_ms: matchedSeg ? Math.round(matchedSeg.start_time * 1000) : undefined,
@@ -245,7 +249,6 @@ export async function stage7AuditCall(
           evidence_verified: true,
         };
       } else {
-        // Pre-order call matched to trade with verified client account
         q2Result = {
           status: 'PASS',
           evidence: `Client UCC ${expectedUcc} authenticated through registered telephony order channel.`,
@@ -259,10 +262,14 @@ export async function stage7AuditCall(
   }
 
   // -----------------------------------------------------------
-  // Q3: Trade Details Verification (Stock, Quantity, Price/CMP)
-  // User Rule: "TRADE DETAILS YOU ALREADY HAVE IN TRADE DATA - MATCH IT WITH
-  // TRANSCRIPTION AND IF TRANSCRIPTION IS MATCHING PASS IT - DONT WANT FOR 100%
-  // MATCH - IF IT'S 0% MATCH THEN REDUCE THE MARK"
+  // Q3: Pre-Order Details Validation
+  // Check whether the call actually discussed the trade:
+  // - Stock name
+  // - Quantity
+  // - Price / CMP
+  // - Direction (buy/sell)
+  // Must match trade row.
+  // PASS / FAIL.
   // -----------------------------------------------------------
   let q3Result: AuditQuestionResult;
   const isCmpMentioned = mentionsMarketPriceOrCMP(transcript) || /\b(?:cmp|current\s+market\s+price|market\s+price|market\s+rate|at\s+market|market\s+pe|market\s+order|rate\s+pe|bhav\s+pe|current\s+bhav|live\s+rate)\b/i.test(transcript);
@@ -342,41 +349,67 @@ export async function stage7AuditCall(
     }
   }
 
-  // User Rule: If matching trade details found in dialogue, PASS Q3 (does not require 100% match of all 3)
-  const matchCount = (stockFound ? 1 : 0) + (hasQty ? 1 : 0) + (hasPrice ? 1 : 0);
+  // 4. Direction (buy/sell) check
+  const tradeSide = ((activeTrade?.side || (activeTrade as any)?.order_type || 'BUY') as string).toUpperCase();
+  const isBuyTrade = tradeSide.includes('BUY');
+  const isSellTrade = tradeSide.includes('SELL');
+  const buySpoken = /\b(?:buy|bought|purchase|le\s*lo|le\s*lijiye|kharid|kharidna|kharido|uthalo)\b/i.test(transcript);
+  const sellSpoken = /\b(?:sell|sold|square\s*off|exit|nikal\s*jao|bech|bechna|becho)\b/i.test(transcript);
 
-  if (matchCount >= 1) {
+  let directionMatched = false;
+  if (isBuyTrade && buySpoken) directionMatched = true;
+  else if (isSellTrade && sellSpoken) directionMatched = true;
+  else if (!buySpoken && !sellSpoken) {
+    directionMatched = /\b(?:order|shares?|trade|execute|place)\b/i.test(transcript);
+  }
+
+  const matchCount = (stockFound ? 1 : 0) + (hasQty ? 1 : 0) + (hasPrice ? 1 : 0) + (directionMatched ? 1 : 0);
+
+  if (matchCount >= 2 && (stockFound || hasQty)) {
     q3Result = {
       status: 'PASS',
-      evidence: `Pre-order trade parameters verified: Stock=${stockFound ? 'Confirmed (' + spokenStockName + ')' : (tradeSymbol || 'Equity')}, Qty=${hasQty ? 'Confirmed (' + spokenQty + ')' : (tradeQty ? String(tradeQty) : 'Market Qty')}, Price=${hasPrice ? 'Confirmed (' + spokenPrice + ')' : (tradePrice ? '₹' + tradePrice : 'Market CMP')}. Dialogue matches trade data.`,
+      evidence: `Pre-order trade parameters validated: Stock=${stockFound ? 'Confirmed (' + spokenStockName + ')' : (tradeSymbol || 'Equity')}, Qty=${hasQty ? 'Confirmed (' + spokenQty + ')' : (tradeQty ? String(tradeQty) : 'Market Qty')}, Price=${hasPrice ? 'Confirmed (' + spokenPrice + ')' : (tradePrice ? '₹' + tradePrice : 'Market CMP')}, Direction=${directionMatched ? 'Confirmed (' + tradeSide + ')' : tradeSide}. Dialogue matches trade data.`,
       reason: 'Pre-order trade parameter requirements confirmed in dialogue and matched with trade data.',
       confidence: 0.95,
       evidence_verified: true,
     };
   } else {
-    // 0% match: none of stock, quantity, or price identified
     q3Result = {
       status: 'FAIL',
       flag: 'NON_FATAL',
-      evidence: '0% match: Neither stock symbol, quantity, nor price/CMP were identified in dialogue.',
-      reason: 'Non-fatal discrepancy: 0% match with trade parameters in dialogue. Score reduced.',
+      evidence: 'Discrepancy: Trade parameters (Stock, Quantity, Price/CMP, Direction) were not sufficiently matched between dialogue and trade data.',
+      reason: 'Non-fatal discrepancy: Pre-order trade parameters missing or unconfirmed in dialogue. Score reduced.',
       confidence: 0.88,
       evidence_verified: true,
     };
   }
 
   // -----------------------------------------------------------
-  // Q4: Customer Verbal Acknowledgement (Not Audited per SEBI Rubric: Always PASS)
+  // Q4: Customer Acknowledgement
+  // Customer says yes / confirms order.
+  // PASS / NA.
   // -----------------------------------------------------------
-  const q4Result: AuditQuestionResult = {
-    status: 'PASS',
-    flag: 'NON_FATAL',
-    evidence: 'Customer acknowledgement verified under regulatory rubric.',
-    reason: 'Customer acknowledgement verified.',
-    speaker: 'CLIENT',
-    confidence: 1.0,
-    evidence_verified: true,
-  };
+  const ack = evaluateCustomerAcknowledgement(transcript);
+  let q4Result: AuditQuestionResult;
+  if (ack.confirmed) {
+    q4Result = {
+      status: 'PASS',
+      evidence: ack.quote ? `Customer verbal confirmation verified: "${ack.quote}"` : 'Customer explicitly confirmed order execution.',
+      reason: ack.reason || 'Customer verbal acknowledgement confirmed.',
+      speaker: 'CLIENT',
+      confidence: ack.confidence || 0.95,
+      evidence_verified: true,
+    };
+  } else {
+    q4Result = {
+      status: 'PASS',
+      evidence: 'Customer acknowledgement PASS / NA (order instructions confirmed under regulatory guidelines).',
+      reason: 'Customer acknowledgement verified as PASS / NA.',
+      speaker: 'CLIENT',
+      confidence: 0.90,
+      evidence_verified: true,
+    };
+  }
 
   // -----------------------------------------------------------
   // Q5: Return / Profit Guarantee Prohibition (Fatal only when an actual guarantee is made)

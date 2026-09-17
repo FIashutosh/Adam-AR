@@ -26,6 +26,7 @@ import type { CallRecord } from '../../src/types';
 import type { ClassificationResult } from './types';
 import { geminiTranscribeLimiter } from '../asr-engine';
 import { detectHighRecallPreOrderCandidate } from '../classifier';
+import { isWithinMarketHours } from '../normalizer';
 
 export interface PipelineWorkerStatus {
   isRunning: boolean;
@@ -277,17 +278,32 @@ export async function runFullPipelineForCall(
       };
     }
 
-    // 2. High-Recall Pre-Order Cross-Check before finalizing REGULAR or REVIEW:
-    // Probe trade execution existence & distributed conversational order parameters
+    // 2. Market Hours Check (09:15 AM to 03:40 PM IST)
+    // Only calls within 09:15 AM - 03:40 PM IST enter PRE_ORDER investigation.
+    const callTime = call.call_time || (call as any).start_time || '';
+    const inMarketHours = isWithinMarketHours(callTime);
+    if (!inMarketHours) {
+      classificationResult = {
+        classification: 'REGULAR',
+        confidence: 0.99,
+        evidence: [],
+        reason: `Call occurred at ${callTime || 'non-market hours'} (outside Indian equity market hours 09:15 AM - 03:40 PM IST). Marked REGULAR.`,
+        model: 'market-hours-gate',
+      };
+    }
+
+    // High-Recall Pre-Order Cross-Check:
+    // USER MANDATE: "Trade data does NOT automatically make a call PRE_ORDER.
+    // A call becomes PRE_ORDER only when the transcript contains the actionable order details."
     const highRecallCandidate = detectHighRecallPreOrderCandidate(call.transcript);
-    const tradeProbe = stage5MatchTrade(db, callId);
+    const tradeProbe = inMarketHours ? stage5MatchTrade(db, callId) : { status: 'NO_MATCH', matched_trade_id: null };
     const hasCorroboratingTrade = tradeProbe.status === 'CONFIRMED' || (tradeProbe.matched_trade_id !== null && tradeProbe.matched_trade_id !== undefined);
 
-    if (classificationResult.classification === 'REGULAR' || classificationResult.classification === 'REVIEW') {
-      if (highRecallCandidate.isCandidate || hasCorroboratingTrade) {
-        // RESCUE: Genuine trading activity corroborated by distributed speech evidence or matching trade record!
-        console.log(`[Pipeline] Call #${callId} -> Rescued from ${classificationResult.classification} to PRE_ORDER (Candidate: ${highRecallCandidate.isCandidate}, TradeMatch: ${hasCorroboratingTrade})`);
-        const evidenceText = highRecallCandidate.evidence || `Corroborating trade #${tradeProbe.matched_trade_id} execution matched.`;
+    if (inMarketHours && (classificationResult.classification === 'REGULAR' || classificationResult.classification === 'REVIEW')) {
+      // ONLY promote if transcript actually contains actionable order intent
+      if (highRecallCandidate.isCandidate) {
+        console.log(`[Pipeline] Call #${callId} -> Grounded order intent identified in transcript (Candidate: true, Corroborating Trade: ${hasCorroboratingTrade})`);
+        const evidenceText = highRecallCandidate.evidence;
         classificationResult = {
           classification: 'PRE_ORDER',
           confidence: 0.95,
@@ -300,7 +316,7 @@ export async function runFullPipelineForCall(
               text: evidenceText,
             },
           ],
-          reason: highRecallCandidate.reason || `Corroborating trade #${tradeProbe.matched_trade_id} execution confirms order directive.`,
+          reason: highRecallCandidate.reason || 'Actionable pre-order directives identified in transcript.',
           model: 'pre-order-recall-rescuer',
         };
       }
@@ -345,17 +361,8 @@ export async function runFullPipelineForCall(
       const hasTradingIntent =
         /\b(?:buy|sell|order|shares?|qty|quantity|cmp|market\s*price|kharid|bech|limit|pe|ce|call|put|nifty|banknifty|holding|portfolio|sq\s*off|square\s*off)\b/i.test(transcript);
 
-      let hasClientTrades = false;
-      const clientCode = call.client_code || call.client;
-      if (clientCode) {
-        try {
-          const trade = db.prepare('SELECT id FROM trades WHERE client = ? OR client_number = ? LIMIT 1').get(clientCode, clientCode);
-          if (trade) hasClientTrades = true;
-        } catch {}
-      }
-
-      if (hasTradingIntent || hasClientTrades) {
-        console.log(`[Pipeline] Call #${callId} -> Automated Review promoted to PRE_ORDER (trading intent or client trade corroboration).`);
+      if (inMarketHours && (hasTradingIntent || highRecallCandidate.isCandidate)) {
+        console.log(`[Pipeline] Call #${callId} -> Automated Review promoted to PRE_ORDER based on spoken trading directives.`);
         classificationResult = {
           classification: 'PRE_ORDER',
           confidence: 0.92,
@@ -368,7 +375,7 @@ export async function runFullPipelineForCall(
               text: call.transcript ? call.transcript.slice(0, 100) : 'Pre-order instruction confirmed by automated review.',
             },
           ],
-          reason: 'Automated Review: Confirmed trading intent and dialogue corroboration. Proceeding automatically to compliance audit.',
+          reason: 'Automated Review: Confirmed trading intent in dialogue. Proceeding to compliance audit.',
           model: 'automated-review-resolver',
         };
       } else {
